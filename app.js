@@ -202,6 +202,7 @@ window.addEventListener('popstate', () => {
   // Unwind one layer at a time, innermost first — the same order Escape uses on
   // the desktop, so back never leaves the app while something is still open.
   history.pushState(null, '');
+  if (!$('#adv').hidden) { $('#adv').hidden = true; return; }
   if (!$('#picker').hidden) { $('#picker').hidden = true; return; }
   if (!$('#player').hidden) { closePlayer(); return; }
   if (state.selecting) { exitSelection(); return; }
@@ -285,14 +286,20 @@ function renderFolders() {
 
 function filterByName(list) {
   const terms = state.query.split(/\s+/).filter(Boolean);
-  if (!terms.length) return list;
-  return list.filter((item) => {
-    const tags = (recordFor(item).tags || []).join(' ').toLowerCase();
-    const hay = item.name.toLowerCase();
-    return terms.every((term) => (term.startsWith('#')
-      ? tags.includes(term.slice(1))
-      : hay.includes(term) || tags.includes(term)));
-  });
+  let out = list;
+  if (terms.length) {
+    out = out.filter((item) => {
+      const tags = (recordFor(item).tags || []).join(' ').toLowerCase();
+      const hay = item.name.toLowerCase();
+      return terms.every((term) => (term.startsWith('#')
+        ? tags.includes(term.slice(1))
+        : hay.includes(term) || tags.includes(term)));
+    });
+  }
+  // Folders have no rating or tags, so the advanced filter applies to videos
+  // only — a folder row is navigation, not a result.
+  if (advActive()) out = out.filter((item) => item.isFolder || matchesAdv(item));
+  return out;
 }
 
 // Which folder + filter the grid currently shows, so an extra page can be
@@ -410,6 +417,175 @@ function tagSelection() {
   }
   render();
   toast(`Tagged ${picked.length} video${picked.length === 1 ? '' : 's'}`, 'ok');
+}
+
+// -------------------------------------------------------- advanced filters
+
+/**
+ * Empty sets mean "no constraint", so a fresh filter is transparent rather than
+ * matching nothing.
+ */
+function newAdvFilter() {
+  return { text: '', tags: new Set(), tagMode: 'all', ratings: new Set(), folders: new Set() };
+}
+
+let adv = newAdvFilter();
+let advDraft = newAdvFilter();
+
+function advActive(f = adv) {
+  return Boolean(f.text) || f.tags.size || f.ratings.size || f.folders.size;
+}
+
+/** Every tag in the library, not just the folder on screen. */
+function tagVocabulary() {
+  const counts = new Map();
+  for (const record of Object.values(state.library.records || {})) {
+    for (const tag of record.tags || []) {
+      const key = tag.toLowerCase();
+      const hit = counts.get(key);
+      if (hit) hit.count += 1;
+      else counts.set(key, { tag, count: 1 });
+    }
+  }
+  return [...counts.values()].sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+}
+
+function matchesAdv(video) {
+  if (adv.text) {
+    const hay = video.name.toLowerCase();
+    if (!adv.text.split(/\s+/).filter(Boolean).every((t) => hay.includes(t))) return false;
+  }
+  const record = recordFor(video);
+  if (adv.ratings.size && !adv.ratings.has(record.rating || 0)) return false;
+  if (adv.tags.size) {
+    const tags = new Set((record.tags || []).map((t) => t.toLowerCase()));
+    const wanted = [...adv.tags].map((t) => t.toLowerCase());
+    const hit = adv.tagMode === 'any' ? wanted.some((t) => tags.has(t)) : wanted.every((t) => tags.has(t));
+    if (!hit) return false;
+  }
+  // Folder selection is handled by loading those folders' videos, not by
+  // filtering — there is nothing to filter until they have been fetched.
+  return true;
+}
+
+function openAdv() {
+  advDraft = {
+    ...adv,
+    tags: new Set(adv.tags),
+    ratings: new Set(adv.ratings),
+    folders: new Set(adv.folders),
+  };
+  $('#advText').value = advDraft.text;
+  $('#adv').hidden = false;
+  renderAdv();
+}
+
+function renderAdv() {
+  const ratings = $('#advRating');
+  ratings.innerHTML = '';
+  for (const value of [0, 1, 2, 3, 4, 5]) {
+    ratings.appendChild(advChip(
+      value === 0 ? 'unrated' : '★'.repeat(value),
+      advDraft.ratings.has(value),
+      () => { toggleIn(advDraft.ratings, value); renderAdv(); },
+    ));
+  }
+
+  const tags = $('#advTags');
+  tags.innerHTML = '';
+  const vocab = tagVocabulary();
+  if (!vocab.length) tags.innerHTML = '<span class="dim">No tags yet</span>';
+  for (const entry of vocab) {
+    tags.appendChild(advChip(`${entry.tag} · ${entry.count}`, advDraft.tags.has(entry.tag), () => {
+      toggleIn(advDraft.tags, entry.tag);
+      renderAdv();
+    }));
+  }
+  $('#advTagMode').textContent = advDraft.tagMode;
+
+  const folders = $('#advFolders');
+  folders.innerHTML = '';
+  if (!state.folders.length) folders.innerHTML = '<span class="dim">No subfolders here</span>';
+  for (const folder of state.folders) {
+    folders.appendChild(advChip(folder.name, advDraft.folders.has(folder.id), () => {
+      toggleIn(advDraft.folders, folder.id);
+      renderAdv();
+    }));
+  }
+
+  const bits = [];
+  if (advDraft.folders.size) bits.push(`${advDraft.folders.size} folder${advDraft.folders.size === 1 ? '' : 's'}`);
+  if (advDraft.tags.size) bits.push(`${advDraft.tags.size} tag${advDraft.tags.size === 1 ? '' : 's'}`);
+  if (advDraft.ratings.size) bits.push(`${advDraft.ratings.size} rating${advDraft.ratings.size === 1 ? '' : 's'}`);
+  $('#advSummary').textContent = bits.join(' · ') || 'no filters';
+}
+
+function advChip(label, on, onClick) {
+  const chip = document.createElement('button');
+  chip.className = 'chip' + (on ? ' on' : '');
+  chip.textContent = label;
+  chip.addEventListener('click', onClick);
+  return chip;
+}
+
+function toggleIn(set, value) {
+  if (set.has(value)) set.delete(value);
+  else set.add(value);
+}
+
+async function applyAdv() {
+  advDraft.text = $('#advText').value.trim().toLowerCase();
+  const picked = [...advDraft.folders];
+  adv = advDraft;
+  $('#adv').hidden = true;
+  $('#advDot').hidden = !advActive();
+  $('#advBtn').classList.toggle('on', advActive());
+
+  if (picked.length) await loadFoldersInto(picked);
+  gridKey = '';
+  render();
+}
+
+/**
+ * Pulls every video below each chosen folder into the current view.
+ *
+ * This is the "including sub-directories" part, and on Graph it is a real walk:
+ * one listing per folder, depth-first. It reports progress and stops at a depth
+ * limit, because a careless tap at the drive root would otherwise enumerate the
+ * entire library.
+ */
+async function loadFoldersInto(folderIds) {
+  const run = state.load;
+  const queue = state.folders.filter((f) => folderIds.includes(f.id))
+    .map((f) => ({ driveId: f.driveId, itemId: f.id, name: f.name, depth: 0 }));
+  const MAX_DEPTH = 4;
+  let scanned = 0;
+
+  while (queue.length) {
+    const folder = queue.shift();
+    if (state.load !== run) return; // navigated away
+    setBusy(`Searching ${folder.name}… ${state.videos.length} found`);
+    try {
+      let next = null;
+      do {
+        const page = await graph.listPage(folder.driveId, folder.itemId, next);
+        state.videos.push(...page.videos);
+        next = page.next;
+      } while (next);
+
+      if (folder.depth < MAX_DEPTH) {
+        const subs = await graph.listFolders(folder.driveId, folder.itemId);
+        for (const sub of subs) {
+          queue.push({ driveId: sub.driveId, itemId: sub.id, name: sub.name, depth: folder.depth + 1 });
+        }
+      }
+    } catch (err) {
+      toast(`${folder.name}: ${err.message}`, 'err');
+    }
+    scanned += 1;
+    if (scanned % 3 === 0) { gridKey = ''; render(); }
+  }
+  setBusy('');
 }
 
 // ------------------------------------------------------------ move picker
@@ -836,6 +1012,18 @@ async function boot() {
   $('#signOut').addEventListener('click', () => { auth.signOut(); location.reload(); });
   $('#playerClose').addEventListener('click', closePlayer);
   $('#loadMore').addEventListener('click', () => loadMore(AUTO_PAGES));
+  $('#advBtn').addEventListener('click', openAdv);
+  $('#advClose').addEventListener('click', () => { $('#adv').hidden = true; });
+  $('#advApply').addEventListener('click', applyAdv);
+  $('#advReset').addEventListener('click', () => {
+    advDraft = newAdvFilter();
+    $('#advText').value = '';
+    renderAdv();
+  });
+  $('#advTagMode').addEventListener('click', () => {
+    advDraft.tagMode = advDraft.tagMode === 'all' ? 'any' : 'all';
+    renderAdv();
+  });
   $('#selTag').addEventListener('click', tagSelection);
   $('#selMove').addEventListener('click', openMovePicker);
   $('#pickerClose').addEventListener('click', () => { $('#picker').hidden = true; });

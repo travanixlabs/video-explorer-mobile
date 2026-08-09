@@ -24,6 +24,13 @@
     <div id="crumb" class="crumb-bar"></div>
     <div class="tools">
       <input id="search" type="search" class="search" placeholder="name or #tag" autocomplete="off">
+      <button id="advBtn" class="btn icon" title="Advanced filters">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+          <path d="M1.5 2.5h13L9.5 8.6v4.2l-3 1.7V8.6z" fill="none" stroke="currentColor"
+                stroke-width="1.4" stroke-linejoin="round"/>
+        </svg>
+        <span id="advDot" class="adv-dot" hidden></span>
+      </button>
       <span id="account" class="account"></span>
       <button id="signOut" class="btn ghost">Sign out</button>
     </div>
@@ -49,6 +56,34 @@
     <button id="selClear" class="btn ghost">✕</button>
   </div>
 </main>
+
+<div id="adv" class="picker" hidden>
+  <div class="picker-card">
+    <header class="picker-head">
+      <span>Advanced filters</span>
+      <button id="advReset" class="btn ghost">Reset</button>
+      <button id="advClose" class="btn ghost">✕</button>
+    </header>
+
+    <div class="adv-body">
+      <input id="advText" type="text" class="search" placeholder="name contains…" autocomplete="off">
+
+      <div class="adv-label">Rating</div>
+      <div id="advRating" class="chip-row"></div>
+
+      <div class="adv-label">Tags <span id="advTagMode" class="mode">all</span></div>
+      <div id="advTags" class="chip-row"></div>
+
+      <div class="adv-label">Folders <span class="dim">including everything inside</span></div>
+      <div id="advFolders" class="chip-row"></div>
+    </div>
+
+    <footer class="picker-foot">
+      <span id="advSummary" class="dim"></span>
+      <button id="advApply" class="btn primary">Apply</button>
+    </footer>
+  </div>
+</div>
 
 <div id="picker" class="picker" hidden>
   <div class="picker-card">
