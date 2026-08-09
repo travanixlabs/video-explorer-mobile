@@ -46,15 +46,35 @@ and would share no code with what already exists.
 
 Nothing is written to the phone's storage except the app shell itself.
 
+## Live
+
+```
+https://travanixlabs.github.io/video-explorer-mobile/
+```
+
+Served from `travanixlabs/video-explorer-mobile` on GitHub Pages — static files
+only, no server, nothing of yours stored there. To redeploy after a change:
+
+```
+cd <this folder>
+git -C <deploy clone> pull && cp * <deploy clone>/ && git -C <deploy clone> commit -am "..." && git -C <deploy clone> push
+```
+
+Pages rebuilds within a minute or two of the push.
+
 ## Setup
 
-**1. Register the redirect URI.** In the Azure portal, open the app
+**1. Register the redirect URIs.** In the Azure portal, open the app
 registration (client `ca1688c6-…`) → **Authentication** → **Add a platform** →
-**Single-page application**, and add:
+**Single-page application**, and add both:
 
 ```
+https://travanixlabs.github.io/video-explorer-mobile/
 http://localhost:5173/
 ```
+
+The first is the hosted app; the second keeps `node serve.js` working for
+development. Both must be the **Single-page application** platform.
 
 The **Single-page application** platform matters. A "Web" platform returns the
 token but sends no CORS headers, so the browser is not allowed to read it — the
