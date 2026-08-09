@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1116">
+<title>Video Explorer</title>
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./icon.svg">
+<link rel="apple-touch-icon" href="./icon-192.png">
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+
+<section id="gate" class="gate" hidden>
+  <h1>Video Explorer</h1>
+  <p>Browse and watch your OneDrive videos, with the ratings and tags you set on your PC.</p>
+  <button id="signIn" class="btn primary">Sign in with Microsoft</button>
+  <p class="fine">Nothing is downloaded to this device. Videos stream straight from OneDrive.</p>
+</section>
+
+<main id="main" hidden>
+  <header class="top">
+    <div id="crumb" class="crumb-bar"></div>
+    <div class="tools">
+      <input id="search" type="search" class="search" placeholder="name or #tag" autocomplete="off">
+      <span id="account" class="account"></span>
+      <button id="signOut" class="btn ghost">Sign out</button>
+    </div>
+  </header>
+
+  <section id="foldersSection" class="folders-section" hidden>
+    <h2>Folders <span id="folderCount" class="dim"></span></h2>
+    <div id="folders" class="folders"></div>
+  </section>
+
+  <section class="videos-section">
+    <h2 id="videoCount">Videos</h2>
+    <div id="videos" class="videos"></div>
+    <button id="loadMore" class="btn more" hidden>Load more</button>
+  </section>
+
+  <div id="selectionBar" class="selection-bar" hidden>
+    <span id="selCount" class="sel-count">0 selected</span>
+    <span id="selStars" class="stars"></span>
+    <button id="selTag" class="btn">Tags…</button>
+    <button id="selMove" class="btn">Move…</button>
+    <button id="selAll" class="btn ghost">All</button>
+    <button id="selClear" class="btn ghost">✕</button>
+  </div>
+</main>
+
+<div id="picker" class="picker" hidden>
+  <div class="picker-card">
+    <header class="picker-head">
+      <span id="pickerTitle">Move to…</span>
+      <button id="pickerClose" class="btn ghost">✕</button>
+    </header>
+    <div id="pickerCrumb" class="crumb-bar"></div>
+    <div id="pickerList" class="folders picker-list"></div>
+    <footer class="picker-foot">
+      <span id="pickerWhere" class="dim"></span>
+      <button id="pickerConfirm" class="btn primary">Move here</button>
+    </footer>
+  </div>
+</div>
+
+<div id="player" class="player" hidden>
+  <div class="player-bar">
+    <span id="playerName" class="player-name"></span>
+    <button id="playerClose" class="btn ghost">✕</button>
+  </div>
+  <video id="playerVideo" controls playsinline preload="metadata"></video>
+</div>
+
+<div id="status" class="busy" hidden></div>
+<div id="toasts" class="toasts"></div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>
