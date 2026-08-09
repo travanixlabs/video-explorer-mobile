@@ -53,14 +53,23 @@ https://travanixlabs.github.io/video-explorer-mobile/
 ```
 
 Served from `travanixlabs/video-explorer-mobile` on GitHub Pages — static files
-only, no server, nothing of yours stored there. To redeploy after a change:
+only, no server, nothing of yours stored there.
+
+**This folder is that repository.** There is no separate deploy copy to keep in
+step, so redeploying is just:
 
 ```
-cd <this folder>
-git -C <deploy clone> pull && cp * <deploy clone>/ && git -C <deploy clone> commit -am "..." && git -C <deploy clone> push
+git add -A && git commit -m "what changed" && git push
 ```
 
-Pages rebuilds within a minute or two of the push.
+Pages rebuilds within a minute or two. `core.autocrlf` is off here on purpose:
+the committed files are LF, and leaving it on marks every one of them modified
+the moment the repo is checked out on Windows.
+
+Note this is a git repository nested inside the `apps` working tree. Nothing in
+`apps` is tracked today, but if that ever changes, add `video-explorer/mobile/`
+to its `.gitignore` — otherwise a `git add .` there captures this folder as a
+submodule pointer rather than files.
 
 ## Setup
 
