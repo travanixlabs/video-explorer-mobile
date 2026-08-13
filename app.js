@@ -15,7 +15,7 @@ const state = {
   library: { version: 1, records: {} },
   dirty: false,       // library edits waiting to be written back
   query: '',
-  sort: 'size',       // matches the desktop default: biggest first
+  sort: 'rating',     // matches the desktop default: highest rated first
   sortDir: 'desc',
   scrub: null,        // { card, video, url } while a finger is down
   load: null,         // token identifying the in-flight folder load
@@ -330,9 +330,9 @@ function sortVideos(list) {
       cmp = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
     } else if (key === 'rating') {
       cmp = (recordFor(a).rating || 0) - (recordFor(b).rating || 0);
-      // Ties fall back to name so the unrated bulk stays browsable rather than
-      // arriving in whatever order Graph happened to return.
-      if (cmp === 0) cmp = a.name.localeCompare(b.name, undefined, { numeric: true });
+      // Returned unflipped: within one rating band names should read A→Z
+      // whichever way the ratings point, or the unrated bulk comes out backwards.
+      if (cmp === 0) return a.name.localeCompare(b.name, undefined, { numeric: true });
     } else {
       cmp = (Number(a[key]) || 0) - (Number(b[key]) || 0);
     }
