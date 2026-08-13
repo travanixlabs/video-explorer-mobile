@@ -40,7 +40,9 @@ async function call(pathOrUrl, options = {}) {
 // `$expand=thumbnails`, which was the whole performance problem — measured on a
 // 236-item folder, a page of 200 costs 6.0s expanded and 0.7s plain. Thumbnails
 // are fetched separately, in batches, only for cards actually on screen.
-const SELECT = 'id,name,size,folder,lastModifiedDateTime,parentReference,remoteItem';
+// `video` is the reason the phone needs no ffprobe: Graph hands back duration,
+// resolution and bitrate with the listing, for nothing.
+const SELECT = 'id,name,size,folder,lastModifiedDateTime,parentReference,remoteItem,video';
 
 export async function me() {
   const drive = await call('/me/drive');
@@ -78,6 +80,12 @@ function normalise(item) {
     shared: Boolean(remote),
     video: !source.folder && VIDEO_EXT.test(item.name),
     thumb: null, // filled in later by thumbnailsFor(), per visible card
+    // Free with the listing, so the phone shows real metadata without decoding
+    // a single frame.
+    duration: source.video ? Math.round((source.video.duration || 0) / 1000) : 0,
+    width: (source.video && source.video.width) || 0,
+    height: (source.video && source.video.height) || 0,
+    bitrate: (source.video && source.video.bitrate) || 0,
   };
 }
 

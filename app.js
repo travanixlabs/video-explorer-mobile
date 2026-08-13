@@ -15,6 +15,8 @@ const state = {
   library: { version: 1, records: {} },
   dirty: false,       // library edits waiting to be written back
   query: '',
+  sort: 'size',       // matches the desktop default: biggest first
+  sortDir: 'desc',
   scrub: null,        // { card, video, url } while a finger is down
   load: null,         // token identifying the in-flight folder load
   next: null,
@@ -28,6 +30,9 @@ const state = {
  * plain, on every page whether or not you scrolled that far.
  */
 const wanted = new Map(); // item id -> the .shot element waiting for a URL
+// Client-side sorting means the grid gets rebuilt rather than appended to, so
+// URLs already fetched are kept — a rebuild must not re-hit Graph.
+const thumbCache = new Map(); // item id -> url
 let thumbTimer = null;
 
 const thumbObserver = new IntersectionObserver((entries) => {
@@ -51,7 +56,9 @@ async function flushThumbs() {
     const urls = await graph.thumbnailsFor(items);
     for (const [id, el] of batch) {
       const url = urls.get(id);
-      if (url && el.isConnected) el.style.backgroundImage = `url("${url}")`;
+      if (!url) continue;
+      thumbCache.set(id, url);
+      if (el.isConnected) el.style.backgroundImage = `url("${url}")`;
     }
   } catch { /* a missing thumbnail is a blank tile, not an error worth a toast */ }
 
@@ -85,15 +92,17 @@ function setBusy(text) {
 // ------------------------------------------------------------------ library
 
 function recordFor(video) {
-  return state.library.records[graph.recordKey(video)] || { rating: 0, tags: [] };
+  return state.library.records[graph.recordKey(video)] || { rating: 0, tags: [], models: [] };
 }
 
 function editRecord(video, patch) {
   const key = graph.recordKey(video);
-  const current = state.library.records[key] || { rating: 0, tags: [], name: video.name };
+  const current = state.library.records[key] || { rating: 0, tags: [], models: [], name: video.name };
   const next = { ...current, name: video.name, updated: Date.now(), ...patch };
-  if (!next.rating && !(next.tags || []).length) delete state.library.records[key];
-  else state.library.records[key] = next;
+  // An empty record is noise in a file that syncs; match the desktop and drop it.
+  if (!next.rating && !(next.tags || []).length && !(next.models || []).length) {
+    delete state.library.records[key];
+  } else state.library.records[key] = next;
   state.dirty = true;
   scheduleSave();
 }
@@ -289,17 +298,46 @@ function filterByName(list) {
   let out = list;
   if (terms.length) {
     out = out.filter((item) => {
-      const tags = (recordFor(item).tags || []).join(' ').toLowerCase();
+      const record = recordFor(item);
+      const tags = (record.tags || []).join(' ').toLowerCase();
+      const models = (record.models || []).join(' ').toLowerCase();
       const hay = item.name.toLowerCase();
-      return terms.every((term) => (term.startsWith('#')
-        ? tags.includes(term.slice(1))
-        : hay.includes(term) || tags.includes(term)));
+      return terms.every((term) => {
+        if (term.startsWith('#')) return tags.includes(term.slice(1));
+        if (term.startsWith('@')) return models.includes(term.slice(1));
+        // A bare term searches everything: name, tags and models.
+        return hay.includes(term) || tags.includes(term) || models.includes(term);
+      });
     });
   }
-  // Folders have no rating or tags, so the advanced filter applies to videos
+  // Folders have no rating or labels, so the advanced filter applies to videos
   // only — a folder row is navigation, not a result.
   if (advActive()) out = out.filter((item) => item.isFolder || matchesAdv(item));
-  return out;
+  return sortVideos(out);
+}
+
+/**
+ * Sorts videos, leaving folders where they are — they render in their own
+ * section, so ordering them by rating would be meaningless.
+ */
+function sortVideos(list) {
+  const dir = state.sortDir === 'asc' ? 1 : -1;
+  const key = state.sort;
+  return list.slice().sort((a, b) => {
+    if (a.isFolder || b.isFolder) return 0;
+    let cmp;
+    if (key === 'name') {
+      cmp = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+    } else if (key === 'rating') {
+      cmp = (recordFor(a).rating || 0) - (recordFor(b).rating || 0);
+      // Ties fall back to name so the unrated bulk stays browsable rather than
+      // arriving in whatever order Graph happened to return.
+      if (cmp === 0) cmp = a.name.localeCompare(b.name, undefined, { numeric: true });
+    } else {
+      cmp = (Number(a[key]) || 0) - (Number(b[key]) || 0);
+    }
+    return cmp * dir;
+  });
 }
 
 // Which folder + filter the grid currently shows, so an extra page can be
@@ -311,7 +349,10 @@ let gridCount = 0;
 function renderVideos() {
   const wrap = $('#videos');
   const list = filterByName(state.videos);
-  const key = state.stack.map((s) => s.itemId).join('/') + '|' + state.query;
+  // Sort belongs in the key: pages arrive in the server's name order, so any
+  // other ordering means a new page can belong anywhere and appending is wrong.
+  const key = state.stack.map((s) => s.itemId).join('/')
+    + '|' + state.query + '|' + state.sort + state.sortDir + '|' + list.length;
 
   if (key !== gridKey) {
     wrap.innerHTML = '';
@@ -426,21 +467,24 @@ function tagSelection() {
  * matching nothing.
  */
 function newAdvFilter() {
-  return { text: '', tags: new Set(), tagMode: 'all', ratings: new Set(), folders: new Set() };
+  return {
+    text: '', tags: new Set(), models: new Set(), tagMode: 'all',
+    ratings: new Set(), folders: new Set(),
+  };
 }
 
 let adv = newAdvFilter();
 let advDraft = newAdvFilter();
 
 function advActive(f = adv) {
-  return Boolean(f.text) || f.tags.size || f.ratings.size || f.folders.size;
+  return Boolean(f.text) || f.tags.size || f.models.size || f.ratings.size || f.folders.size;
 }
 
-/** Every tag in the library, not just the folder on screen. */
-function tagVocabulary() {
+/** Everything in use for a field across the whole library, not just this folder. */
+function vocabulary(field = 'tags') {
   const counts = new Map();
   for (const record of Object.values(state.library.records || {})) {
-    for (const tag of record.tags || []) {
+    for (const tag of record[field] || []) {
       const key = tag.toLowerCase();
       const hit = counts.get(key);
       if (hit) hit.count += 1;
@@ -457,10 +501,14 @@ function matchesAdv(video) {
   }
   const record = recordFor(video);
   if (adv.ratings.size && !adv.ratings.has(record.rating || 0)) return false;
-  if (adv.tags.size) {
-    const tags = new Set((record.tags || []).map((t) => t.toLowerCase()));
-    const wanted = [...adv.tags].map((t) => t.toLowerCase());
-    const hit = adv.tagMode === 'any' ? wanted.some((t) => tags.has(t)) : wanted.every((t) => tags.has(t));
+
+  // Each facet is checked on its own: two models and one tag means "those
+  // models AND that tag", not one merged pool.
+  for (const field of ['tags', 'models']) {
+    if (!adv[field].size) continue;
+    const have = new Set((record[field] || []).map((t) => t.toLowerCase()));
+    const wanted = [...adv[field]].map((t) => t.toLowerCase());
+    const hit = adv.tagMode === 'any' ? wanted.some((t) => have.has(t)) : wanted.every((t) => have.has(t));
     if (!hit) return false;
   }
   // Folder selection is handled by loading those folders' videos, not by
@@ -472,6 +520,7 @@ function openAdv() {
   advDraft = {
     ...adv,
     tags: new Set(adv.tags),
+    models: new Set(adv.models),
     ratings: new Set(adv.ratings),
     folders: new Set(adv.folders),
   };
@@ -491,15 +540,19 @@ function renderAdv() {
     ));
   }
 
-  const tags = $('#advTags');
-  tags.innerHTML = '';
-  const vocab = tagVocabulary();
-  if (!vocab.length) tags.innerHTML = '<span class="dim">No tags yet</span>';
-  for (const entry of vocab) {
-    tags.appendChild(advChip(`${entry.tag} · ${entry.count}`, advDraft.tags.has(entry.tag), () => {
-      toggleIn(advDraft.tags, entry.tag);
-      renderAdv();
-    }));
+  for (const [field, el, empty] of [
+    ['models', '#advModels', 'No models yet'],
+    ['tags', '#advTags', 'No tags yet'],
+  ]) {
+    const box = $(el);
+    const vocab = vocabulary(field);
+    box.innerHTML = vocab.length ? '' : `<span class="dim">${empty}</span>`;
+    for (const entry of vocab) {
+      box.appendChild(advChip(`${entry.tag} · ${entry.count}`, advDraft[field].has(entry.tag), () => {
+        toggleIn(advDraft[field], entry.tag);
+        renderAdv();
+      }));
+    }
   }
   $('#advTagMode').textContent = advDraft.tagMode;
 
@@ -515,6 +568,7 @@ function renderAdv() {
 
   const bits = [];
   if (advDraft.folders.size) bits.push(`${advDraft.folders.size} folder${advDraft.folders.size === 1 ? '' : 's'}`);
+  if (advDraft.models.size) bits.push(`${advDraft.models.size} model${advDraft.models.size === 1 ? '' : 's'}`);
   if (advDraft.tags.size) bits.push(`${advDraft.tags.size} tag${advDraft.tags.size === 1 ? '' : 's'}`);
   if (advDraft.ratings.size) bits.push(`${advDraft.ratings.size} rating${advDraft.ratings.size === 1 ? '' : 's'}`);
   $('#advSummary').textContent = bits.join(' · ') || 'no filters';
@@ -723,7 +777,9 @@ function buildCard(video) {
   shot.className = 'shot';
   shot.dataset.id = video.id;
   shot.dataset.drive = video.driveId;
-  thumbObserver.observe(shot);
+  const cached = thumbCache.get(video.id);
+  if (cached) shot.style.backgroundImage = `url("${cached}")`;
+  else thumbObserver.observe(shot);
 
   const scrubHint = document.createElement('div');
   scrubHint.className = 'scrub-hint';
@@ -732,7 +788,8 @@ function buildCard(video) {
 
   const badge = document.createElement('span');
   badge.className = 'badge';
-  badge.textContent = fmtBytes(video.size);
+  // Duration comes free from Graph's video facet, so it leads and size follows.
+  badge.textContent = video.duration ? fmtTime(video.duration) : fmtBytes(video.size);
   shot.appendChild(badge);
 
   const play = document.createElement('button');
@@ -755,8 +812,57 @@ function buildCard(video) {
   name.textContent = video.name;
   card.appendChild(name);
 
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.textContent = [
+    video.width ? `${video.width}×${video.height}` : '',
+    fmtBytes(video.size),
+    video.bitrate ? `${Math.round(video.bitrate / 1000)} kbps` : '',
+  ].filter(Boolean).join('  ·  ');
+  card.appendChild(meta);
+
   card.appendChild(buildRecordRow(video));
   return card;
+}
+
+/**
+ * Models and tags are the same shape, so one builder covers both — mirroring the
+ * desktop, where they stay separate fields rather than a tag naming convention.
+ */
+function buildLabelChips(video, field, row) {
+  const record = recordFor(video);
+  const prefix = field === 'models' ? '@' : '#';
+  const chips = document.createElement('span');
+  chips.className = 'chips';
+
+  for (const value of record[field] || []) {
+    const chip = document.createElement('button');
+    chip.className = 'chip' + (field === 'models' ? ' chip-model' : '');
+    chip.textContent = value;
+    chip.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      $('#search').value = prefix + value;
+      state.query = (prefix + value).toLowerCase();
+      render();
+    });
+    chips.appendChild(chip);
+  }
+
+  const add = document.createElement('button');
+  add.className = 'chip add' + (field === 'models' ? ' chip-model' : '');
+  add.textContent = (record[field] || []).length ? '+' : (field === 'models' ? '+ model' : '+ tag');
+  add.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    const typed = window.prompt(
+      field === 'models' ? 'Models, comma separated' : 'Tags, comma separated',
+      (record[field] || []).join(', '),
+    );
+    if (typed === null) return;
+    editRecord(video, { [field]: typed.split(',').map((t) => t.trim()).filter(Boolean) });
+    row.replaceWith(buildRecordRow(video));
+  });
+  chips.appendChild(add);
+  return chips;
 }
 
 function buildRecordRow(video) {
@@ -779,35 +885,8 @@ function buildRecordRow(video) {
   }
   row.appendChild(stars);
 
-  const chips = document.createElement('span');
-  chips.className = 'chips';
-  for (const tag of record.tags || []) {
-    const chip = document.createElement('button');
-    chip.className = 'chip';
-    chip.textContent = tag;
-    chip.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      $('#search').value = '#' + tag;
-      state.query = ('#' + tag).toLowerCase();
-      render();
-    });
-    chips.appendChild(chip);
-  }
-
-  const add = document.createElement('button');
-  add.className = 'chip add';
-  add.textContent = (record.tags || []).length ? '+' : '+ tag';
-  add.addEventListener('click', (ev) => {
-    ev.stopPropagation();
-    const typed = window.prompt('Tags, comma separated', (record.tags || []).join(', '));
-    if (typed === null) return;
-    const tags = typed.split(',').map((t) => t.trim()).filter(Boolean);
-    editRecord(video, { tags });
-    row.replaceWith(buildRecordRow(video));
-  });
-  chips.appendChild(add);
-
-  row.appendChild(chips);
+  row.appendChild(buildLabelChips(video, 'models', row));
+  row.appendChild(buildLabelChips(video, 'tags', row));
   return row;
 }
 
@@ -1012,6 +1091,20 @@ async function boot() {
   $('#signOut').addEventListener('click', () => { auth.signOut(); location.reload(); });
   $('#playerClose').addEventListener('click', closePlayer);
   $('#loadMore').addEventListener('click', () => loadMore(AUTO_PAGES));
+  $('#sortSelect').value = state.sort;
+  $('#sortDir').textContent = state.sortDir === 'desc' ? '↓' : '↑';
+  $('#sortSelect').addEventListener('change', (ev) => {
+    state.sort = ev.target.value;
+    gridKey = ''; // the order changed, so the grid has to be rebuilt
+    render();
+  });
+  $('#sortDir').addEventListener('click', () => {
+    state.sortDir = state.sortDir === 'desc' ? 'asc' : 'desc';
+    $('#sortDir').textContent = state.sortDir === 'desc' ? '↓' : '↑';
+    gridKey = '';
+    render();
+  });
+
   $('#advBtn').addEventListener('click', openAdv);
   $('#advClose').addEventListener('click', () => { $('#adv').hidden = true; });
   $('#advApply').addEventListener('click', applyAdv);

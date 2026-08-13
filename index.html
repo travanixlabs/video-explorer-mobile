@@ -24,6 +24,14 @@
     <div id="crumb" class="crumb-bar"></div>
     <div class="tools">
       <input id="search" type="search" class="search" placeholder="name or #tag" autocomplete="off">
+      <select id="sortSelect" class="sort-select" title="Sort">
+        <option value="name">Name</option>
+        <option value="mtime">Date</option>
+        <option value="size">Size</option>
+        <option value="duration">Length</option>
+        <option value="rating">Rating</option>
+      </select>
+      <button id="sortDir" class="btn icon" title="Reverse order">↓</button>
       <button id="advBtn" class="btn icon" title="Advanced filters">
         <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
           <path d="M1.5 2.5h13L9.5 8.6v4.2l-3 1.7V8.6z" fill="none" stroke="currentColor"
@@ -70,6 +78,9 @@
 
       <div class="adv-label">Rating</div>
       <div id="advRating" class="chip-row"></div>
+
+      <div class="adv-label">Models</div>
+      <div id="advModels" class="chip-row"></div>
 
       <div class="adv-label">Tags <span id="advTagMode" class="mode">all</span></div>
       <div id="advTags" class="chip-row"></div>
