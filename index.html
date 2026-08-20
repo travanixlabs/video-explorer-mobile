@@ -115,9 +115,14 @@
 <div id="player" class="player" hidden>
   <div class="player-bar">
     <span id="playerName" class="player-name"></span>
+    <span id="playerPos" class="player-pos"></span>
     <button id="playerClose" class="btn ghost">✕</button>
   </div>
-  <video id="playerVideo" controls playsinline preload="metadata"></video>
+  <div class="player-stage">
+    <video id="playerVideo" controls playsinline preload="metadata"></video>
+    <button id="playerPrev" class="player-nav prev" aria-label="Previous video">‹</button>
+    <button id="playerNext" class="player-nav next" aria-label="Next video">›</button>
+  </div>
 </div>
 
 <div id="status" class="busy" hidden></div>

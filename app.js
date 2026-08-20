@@ -1156,6 +1156,7 @@ async function openPlayer(video) {
   const el = $('#playerVideo');
   if (modal.hidden) playerReturn = window.scrollY; // only the way in sets the mark
   state.playingId = video.id;
+  syncPlayerNav();
   $('#playerName').textContent = video.name;
   modal.hidden = false;
   setBusy('Opening…');
@@ -1178,12 +1179,28 @@ async function openPlayer(video) {
  * Left is forward, matching the way a photo gallery moves: the current item
  * leaves to the left.
  */
+function playerList() {
+  return filterByName(state.videos).filter((v) => !v.isFolder);
+}
+
 function playSibling(step) {
-  const list = filterByName(state.videos).filter((v) => !v.isFolder);
+  const list = playerList();
   if (list.length < 2 || !state.playingId) return;
   const at = list.findIndex((v) => v.id === state.playingId);
   if (at < 0) return;
   openPlayer(list[((at + step) % list.length + list.length) % list.length]);
+}
+
+/** Hides the arrows when there is nowhere to go, and says where you are. */
+function syncPlayerNav() {
+  const list = playerList();
+  const at = list.findIndex((v) => v.id === state.playingId);
+  const usable = list.length > 1 && at >= 0;
+  $('#playerPrev').hidden = !usable;
+  $('#playerNext').hidden = !usable;
+  const pos = $('#playerPos');
+  pos.hidden = at < 0;
+  pos.textContent = at < 0 ? '' : `${at + 1} / ${list.length}`;
 }
 
 /**
@@ -1195,7 +1212,8 @@ function attachPlayerSwipe() {
   let from = null;
 
   modal.addEventListener('touchstart', (ev) => {
-    if (ev.touches.length !== 1 || ev.target.closest('.player-bar')) { from = null; return; }
+    // The bar and the arrows are taps, not swipes.
+    if (ev.touches.length !== 1 || ev.target.closest('.player-bar, .player-nav')) { from = null; return; }
     const t = ev.touches[0];
     from = t.clientY > window.innerHeight - 90 ? null : { x: t.clientX, y: t.clientY };
   }, { passive: true });
@@ -1234,6 +1252,8 @@ async function boot() {
   $('#signIn').addEventListener('click', () => auth.signIn().catch((e) => toast(e.message, 'err')));
   $('#signOut').addEventListener('click', () => { auth.signOut(); location.reload(); });
   $('#playerClose').addEventListener('click', closePlayer);
+  $('#playerPrev').addEventListener('click', () => playSibling(-1));
+  $('#playerNext').addEventListener('click', () => playSibling(1));
   attachPlayerSwipe();
   $('#loadMore').addEventListener('click', () => loadMore(state.flatten ? FLAT_PAGES : AUTO_PAGES));
 
