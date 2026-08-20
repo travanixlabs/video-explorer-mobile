@@ -903,12 +903,42 @@ function buildRecordRow(video) {
 function attachScrub(shot, video) {
   const hint = () => shot.querySelector('.scrub-hint');
 
-  const begin = async (ev) => {
+  // A finger that has landed but not yet said what it wants. Touch has to
+  // declare itself: until it moves there is no telling a scrub from a page
+  // scroll, and claiming the gesture on contact is what made a screen of
+  // thumbnails a wall the scroller could not get through.
+  let intent = null;
+
+  const onDown = (ev) => {
     if (ev.button !== undefined && ev.button !== 0) return; // left / primary only
     if (ev.target.closest('.play')) return;                 // ▶ is not a scrub handle
     if (state.selecting) return;                            // selection mode owns taps
-    ev.preventDefault();
+    if (ev.pointerType === 'touch') {
+      // No preventDefault and no capture yet -- both would take the scroll away.
+      intent = { id: ev.pointerId, x: ev.clientX, y: ev.clientY };
+      return;
+    }
+    begin(ev); // a mouse or pen drag was never going to scroll the page
+  };
+
+  const onMove = (ev) => {
+    if (!intent || ev.pointerId !== intent.id) { move(ev); return; }
+    const dx = Math.abs(ev.clientX - intent.x);
+    const dy = Math.abs(ev.clientY - intent.y);
+    // Whichever axis clears the threshold first owns the gesture, and the loser
+    // does not get a second chance on the same finger.
+    if (dy > 8 && dy > dx) { intent = null; return; }
+    if (dx > 8) { intent = null; begin(ev); }
+  };
+
+  const finish = (ev) => {
+    if (intent && ev.pointerId === intent.id) intent = null;
+    endScrub();
+  };
+
+  const begin = async (ev) => {
     if (state.scrub) endScrub();
+    ev.preventDefault();
 
     // Without capture the drag dies the moment the pointer crosses out of the
     // tile — and with a finger that is most of the gesture.
@@ -960,10 +990,10 @@ function attachScrub(shot, video) {
     seekTo(session, fraction);
   };
 
-  shot.addEventListener('pointerdown', begin);
-  shot.addEventListener('pointermove', move);
-  shot.addEventListener('pointerup', endScrub);
-  shot.addEventListener('pointercancel', endScrub);
+  shot.addEventListener('pointerdown', onDown);
+  shot.addEventListener('pointermove', onMove);
+  shot.addEventListener('pointerup', finish);
+  shot.addEventListener('pointercancel', finish);
   // Deliberately no pointerleave: with capture the pointer legitimately travels
   // outside the tile mid-drag, and ending there is exactly the bug this had.
 }

@@ -30,7 +30,9 @@ and would share no code with what already exists.
 - Folders above videos, breadcrumb navigation, Android back button walks the trail
 - Thumbnails from Graph, so nothing is decoded on the phone
 - **Drag across a thumbnail to scrub it.** A phone has no hover, and position
-  maps to time better than a timed slideshow does: your finger is the timeline
+  maps to time better than a timed slideshow does: your finger is the timeline.
+  Sideways is the scrub; up and down is the page, so a screen full of thumbnails
+  still scrolls. Whichever axis moves 8px first owns the gesture
 - **Long-press to select**, then tap to add more. The bar that appears rates,
   tags or moves everything selected at once; **All** takes whatever the filter
   is showing

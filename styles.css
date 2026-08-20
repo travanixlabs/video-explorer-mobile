@@ -10,7 +10,11 @@
   --accent: #4c9aff;
   --accent-ink: #08131f;
   --danger: #f4685f;
+  --menu: #29323e;   /* native popups: light enough to read as a menu */
   --radius: 12px;
+  /* Tells the browser to draw its own widgets -- scrollbars, the option
+     list, form controls -- from the dark palette rather than the light one. */
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -163,7 +167,9 @@ main { padding: 0 12px 40px; }
   position: relative;
   aspect-ratio: 16 / 9;
   background: #000 center/cover no-repeat;
-  touch-action: none; /* the drag is ours, not the scroller's */
+  /* Sideways is ours (the scrub), up and down is the page's. `none` here meant
+     a screen of thumbnails was a wall the scroller could not get through. */
+  touch-action: pan-y;
   cursor: ew-resize;
 }
 .scrub-video {
@@ -257,12 +263,24 @@ main { padding: 0 12px 40px; }
   white-space: nowrap;
 }
 
+/* The native option list takes its colours from the select itself, and one step
+   up from the page background left an open menu almost black on black. It sits
+   two steps up now, so the list reads as something floating above the page. */
 .sort-select {
-  background: var(--bg-elev);
+  background: var(--bg-elev-2);
+  color: var(--text);
   border: 1px solid var(--border-strong);
   border-radius: 9px;
   padding: 8px 6px;
   max-width: 26vw;
+}
+.sort-select option {
+  background: var(--menu);
+  color: var(--text);
+}
+.sort-select option:checked {
+  background: var(--accent);
+  color: var(--accent-ink);
 }
 
 .chips { display: flex; flex-wrap: wrap; gap: 5px; }
