@@ -199,6 +199,22 @@ async function loadMore(pages = 1) {
   }
 }
 
+/**
+ * Pushes an entry for the next Back to absorb, in manual scroll-restoration
+ * mode. These entries are a back-button trap, not navigation — the folder trail
+ * is app state — so there is nothing the browser could usefully restore, and on
+ * 'auto' it restored the offset recorded for the entry Back lands on, which is
+ * the top of the page. That is what threw the grid away when you left a video.
+ *
+ * The mode belongs to an entry rather than the document, so it is set on both
+ * sides of the push: the entry we are leaving and the one we are creating.
+ */
+function pushTrap() {
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+  history.pushState(null, '');
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+}
+
 async function goUp() {
   if (!state.stack.length) return;
   state.stack.pop();
@@ -210,7 +226,7 @@ async function goUp() {
 window.addEventListener('popstate', () => {
   // Unwind one layer at a time, innermost first — the same order Escape uses on
   // the desktop, so back never leaves the app while something is still open.
-  history.pushState(null, '');
+  pushTrap();
   if (!$('#adv').hidden) { $('#adv').hidden = true; return; }
   if (!$('#picker').hidden) { $('#picker').hidden = true; return; }
   if (!$('#player').hidden) { closePlayer(); return; }
@@ -1089,9 +1105,17 @@ function endScrub() {
 
 // ------------------------------------------------------------------- player
 
+/**
+ * Where the grid was when the player opened. Restored on the way out: closing
+ * is a return to what you were doing, not a fresh arrival, and both back and
+ * the native fullscreen exit are happy to leave the page at the top otherwise.
+ */
+let playerReturn = null;
+
 async function openPlayer(video) {
   const modal = $('#player');
   const el = $('#playerVideo');
+  playerReturn = window.scrollY;
   $('#playerName').textContent = video.name;
   modal.hidden = false;
   setBusy('Opening…');
@@ -1112,6 +1136,14 @@ function closePlayer() {
   el.removeAttribute('src');
   el.load();
   $('#player').hidden = true;
+
+  if (playerReturn === null) return;
+  const back = playerReturn;
+  playerReturn = null;
+  // Next frame, so the document is back to its full height before the scroll.
+  requestAnimationFrame(() => {
+    if (Math.abs(window.scrollY - back) > 2) window.scrollTo(0, back);
+  });
 }
 
 // --------------------------------------------------------------------- init
@@ -1178,7 +1210,7 @@ async function boot() {
 
   $('#gate').hidden = true;
   $('#main').hidden = false;
-  history.pushState(null, ''); // gives the Android back button something to pop
+  pushTrap(); // gives the Android back button something to pop
 
   try {
     state.account = await graph.me();
