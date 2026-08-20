@@ -33,6 +33,12 @@ and would share no code with what already exists.
   maps to time better than a timed slideshow does: your finger is the timeline.
   Sideways is the scrub; up and down is the page, so a screen full of thumbnails
   still scrolls. Whichever axis moves 8px first owns the gesture
+- **⇊ flattens the subfolders** — every video below here in one grid. It walks
+  the tree breadth-first, one folder per page, taking each folder's subfolders
+  from the same response as its videos so the walk costs no extra request
+- **Swipe across the video** in the player for the next one in the listing — the
+  order the grid is showing, filter and sort included, wrapping at both ends.
+  The bottom strip is left alone: a sideways drag there is the video's own seek
 - **Long-press to select**, then tap to add more. The bar that appears rates,
   tags or moves everything selected at once; **All** takes whatever the filter
   is showing

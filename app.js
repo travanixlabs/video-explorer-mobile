@@ -20,6 +20,10 @@ const state = {
   scrub: null,        // { card, video, url } while a finger is down
   load: null,         // token identifying the in-flight folder load
   next: null,
+  flatten: false,     // every video below here, not just this folder
+  walk: null,         // { driveId, itemId, next } — where the flattened walk is
+  queue: [],          // folders the walk has seen but not visited yet
+  playingId: null,    // which video the player has open, for swipe-to-next
   selecting: false,   // selection mode: taps toggle instead of scrubbing
   selected: new Set(), // item ids
 };
@@ -148,6 +152,8 @@ async function openFolder(entry, { push = true } = {}) {
   state.folders = [];
   state.videos = [];
   state.next = null;
+  state.queue = [];
+  state.walk = null;
   render();
   window.scrollTo(0, 0);
   setBusy('Loading…');
@@ -155,6 +161,8 @@ async function openFolder(entry, { push = true } = {}) {
   const driveId = entry ? entry.driveId : null;
   const itemId = entry ? entry.itemId : null;
   state.source = { driveId, itemId, run };
+  // Flattened, the listing is a walk that starts here and works downwards.
+  if (state.flatten) state.walk = { driveId, itemId, next: null };
 
   // Folders and videos are separate queries with different orderings, so they
   // run side by side rather than one behind the other.
@@ -166,13 +174,21 @@ async function openFolder(entry, { push = true } = {}) {
     if (state.load === run) toast(err.message, 'err');
   });
 
-  await loadMore(AUTO_PAGES);
+  await loadMore(state.flatten ? FLAT_PAGES : AUTO_PAGES);
 }
 
 // Pages pulled without being asked. Three is roughly 600 videos — enough that
 // most folders finish on their own, while the 5,000-video ones stop before
 // they have put that many cards into a phone's DOM.
 const AUTO_PAGES = 3;
+// Flattened, a page is one folder's worth rather than 200 videos, and a folder
+// of a dozen clips is common — three of those would barely fill a screen.
+const FLAT_PAGES = 10;
+
+/** Whether anything is left to load, in either mode. */
+function moreToLoad() {
+  return state.flatten ? Boolean(state.walk) : Boolean(state.next);
+}
 
 async function loadMore(pages = 1) {
   const { driveId, itemId, run } = state.source;
@@ -180,17 +196,31 @@ async function loadMore(pages = 1) {
 
   try {
     do {
-      const page = await graph.listPage(driveId, itemId, state.next);
+      if (state.flatten && !state.walk) return; // the walk finished
+      const page = state.flatten
+        ? await graph.listChildren(state.walk.driveId, state.walk.itemId, state.walk.next)
+        : await graph.listPage(driveId, itemId, state.next);
       // A folder tapped while this one was still streaming wins; anything this
       // loop produces from here belongs to a screen the user has left.
       if (state.load !== run) return;
 
       state.videos.push(...page.videos);
-      state.next = page.next;
+      if (state.flatten) {
+        // Breadth-first: finish the folder in hand, then take the next off the
+        // queue. Subfolders join the queue as they are seen, which is why the
+        // walk needs no extra request per folder.
+        state.queue.push(...page.folders.map((f) => ({ driveId: f.driveId, itemId: f.id })));
+        state.walk = page.next
+          ? { ...state.walk, next: page.next }
+          : (state.queue.shift() || null);
+        if (state.walk && !('next' in state.walk)) state.walk.next = null;
+      } else {
+        state.next = page.next;
+      }
       remaining -= 1;
       render();
-      setBusy(state.next && remaining > 0 ? 'Loading more…' : '');
-    } while (state.next && remaining > 0);
+      setBusy(moreToLoad() && remaining > 0 ? 'Loading more…' : '');
+    } while (moreToLoad() && remaining > 0);
   } catch (err) {
     if (state.load === run) {
       toast(err.message, 'err');
@@ -361,16 +391,24 @@ function sortVideos(list) {
 // thumbnails on every arrival.
 let gridKey = '';
 let gridCount = 0;
+let gridTail = ''; // id of the last card appended, so a reorder is noticed
 
 function renderVideos() {
   const wrap = $('#videos');
   const list = filterByName(state.videos);
   // Sort belongs in the key: pages arrive in the server's name order, so any
   // other ordering means a new page can belong anywhere and appending is wrong.
+  // The length is deliberately NOT in the key: it changed on every arriving
+  // page, so the grid was wiped and rebuilt each time -- thousands of cards
+  // re-created, their thumbnails re-fetched, and the page height collapsing
+  // under a finger that was scrolling. What actually invalidates the appended
+  // cards is a different folder, filter or sort, or the order changing beneath
+  // us, and the tail check below catches that.
   const key = state.stack.map((s) => s.itemId).join('/')
-    + '|' + state.query + '|' + state.sort + state.sortDir + '|' + list.length;
+    + '|' + state.query + '|' + state.sort + state.sortDir + '|' + state.flatten;
+  const tailMoved = gridCount > 0 && (list[gridCount - 1] || {}).id !== gridTail;
 
-  if (key !== gridKey) {
+  if (key !== gridKey || tailMoved) {
     wrap.innerHTML = '';
     wanted.clear();
     gridKey = key;
@@ -378,13 +416,14 @@ function renderVideos() {
   }
   for (let i = gridCount; i < list.length; i += 1) wrap.appendChild(buildCard(list[i]));
   gridCount = list.length;
+  gridTail = gridCount ? list[gridCount - 1].id : '';
 
   $('#videoCount').textContent = list.length
-    ? `${list.length} video${list.length === 1 ? '' : 's'}${state.next ? ' so far' : ''}`
-    : (state.next ? 'Loading…' : 'No videos here');
+    ? `${list.length} video${list.length === 1 ? '' : 's'}${moreToLoad() ? ' so far' : ''}`
+    : (moreToLoad() ? 'Loading…' : 'No videos here');
 
   const more = $('#loadMore');
-  more.hidden = !state.next;
+  more.hidden = !moreToLoad();
   more.textContent = `Load more (${state.videos.length} loaded)`;
 }
 
@@ -1115,7 +1154,8 @@ let playerReturn = null;
 async function openPlayer(video) {
   const modal = $('#player');
   const el = $('#playerVideo');
-  playerReturn = window.scrollY;
+  if (modal.hidden) playerReturn = window.scrollY; // only the way in sets the mark
+  state.playingId = video.id;
   $('#playerName').textContent = video.name;
   modal.hidden = false;
   setBusy('Opening…');
@@ -1130,12 +1170,54 @@ async function openPlayer(video) {
   }
 }
 
+/**
+ * Swipe across the video for the next one in the listing, the same order the
+ * grid is showing -- filter and sort included, since that is the list you were
+ * looking at. Wraps at both ends, so neither direction is ever a dead swipe.
+ *
+ * Left is forward, matching the way a photo gallery moves: the current item
+ * leaves to the left.
+ */
+function playSibling(step) {
+  const list = filterByName(state.videos).filter((v) => !v.isFolder);
+  if (list.length < 2 || !state.playingId) return;
+  const at = list.findIndex((v) => v.id === state.playingId);
+  if (at < 0) return;
+  openPlayer(list[((at + step) % list.length + list.length) % list.length]);
+}
+
+/**
+ * Horizontal swipes only, and not from the bottom of the screen: that strip is
+ * the video's own controls, where a sideways drag is a seek.
+ */
+function attachPlayerSwipe() {
+  const modal = $('#player');
+  let from = null;
+
+  modal.addEventListener('touchstart', (ev) => {
+    if (ev.touches.length !== 1 || ev.target.closest('.player-bar')) { from = null; return; }
+    const t = ev.touches[0];
+    from = t.clientY > window.innerHeight - 90 ? null : { x: t.clientX, y: t.clientY };
+  }, { passive: true });
+
+  modal.addEventListener('touchend', (ev) => {
+    if (!from) return;
+    const t = ev.changedTouches[0];
+    const dx = t.clientX - from.x;
+    const dy = t.clientY - from.y;
+    from = null;
+    if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+    playSibling(dx < 0 ? 1 : -1);
+  }, { passive: true });
+}
+
 function closePlayer() {
   const el = $('#playerVideo');
   el.pause();
   el.removeAttribute('src');
   el.load();
   $('#player').hidden = true;
+  state.playingId = null;
 
   if (playerReturn === null) return;
   const back = playerReturn;
@@ -1152,7 +1234,17 @@ async function boot() {
   $('#signIn').addEventListener('click', () => auth.signIn().catch((e) => toast(e.message, 'err')));
   $('#signOut').addEventListener('click', () => { auth.signOut(); location.reload(); });
   $('#playerClose').addEventListener('click', closePlayer);
-  $('#loadMore').addEventListener('click', () => loadMore(AUTO_PAGES));
+  attachPlayerSwipe();
+  $('#loadMore').addEventListener('click', () => loadMore(state.flatten ? FLAT_PAGES : AUTO_PAGES));
+
+  // Flatten is a view you reach for rather than a mode you live in, so it is not
+  // persisted -- same as the desktop, which resets it at every launch.
+  $('#flatBtn').addEventListener('click', () => {
+    state.flatten = !state.flatten;
+    $('#flatBtn').classList.toggle('on', state.flatten);
+    const here = state.stack[state.stack.length - 1] || null;
+    openFolder(here, { push: false });
+  });
   $('#sortSelect').value = state.sort;
   $('#sortDir').textContent = state.sortDir === 'desc' ? '↓' : '↑';
   $('#sortSelect').addEventListener('change', (ev) => {

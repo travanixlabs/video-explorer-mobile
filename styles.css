@@ -19,6 +19,17 @@
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
+/* A long press on a tile must not start native text selection: that gesture
+   then swallows the drag after it, so holding a thumbnail and pulling made the
+   page refuse to scroll. Measured in a headless browser -- the same finger
+   travel scrolled 265px with selection live, 474px with it off. The player and
+   the dialogs are left selectable; it is the grid you drag across. */
+.card, .folder, .tools, .crumb-bar, .selection-bar {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
 html, body {
   margin: 0;
   background: var(--bg);

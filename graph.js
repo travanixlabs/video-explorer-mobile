@@ -147,6 +147,27 @@ export async function listPage(driveId, itemId, next = null) {
 }
 
 /**
+ * A page of children with the folders kept, for the flattened walk.
+ *
+ * listPage() throws folders away because it has to: taking them from a listing
+ * that is still loading is what once hid a subfolder. Flattening pages through
+ * every child anyway, so the subfolders arrive free with the videos and cost no
+ * request of their own.
+ *
+ * No $orderby: the walk cannot be in global name order regardless -- it covers
+ * one folder at a time -- and the default ordering is the cheaper one.
+ */
+export async function listChildren(driveId, itemId, next = null) {
+  const page = await call(next || childrenUrl(driveId, itemId, `?$select=${SELECT}&$top=200`));
+  const entries = (page.value || []).map(normalise);
+  return {
+    videos: entries.filter((e) => e.video),
+    folders: entries.filter((e) => e.isFolder),
+    next: page['@odata.nextLink'] || null,
+  };
+}
+
+/**
  * Thumbnail URLs for up to 20 items in a single round trip, via Graph's $batch
  * endpoint. The URLs it returns are pre-signed, so an <img> loads them with no
  * Authorization header — which is why this is a JSON call rather than fetching
