@@ -96,15 +96,15 @@ function setBusy(text) {
 // ------------------------------------------------------------------ library
 
 function recordFor(video) {
-  return state.library.records[graph.recordKey(video)] || { rating: 0, tags: [], models: [] };
+  return state.library.records[graph.recordKey(video)] || { rating: 0, tags: [] };
 }
 
 function editRecord(video, patch) {
   const key = graph.recordKey(video);
-  const current = state.library.records[key] || { rating: 0, tags: [], models: [], name: video.name };
+  const current = state.library.records[key] || { rating: 0, tags: [], name: video.name };
   const next = { ...current, name: video.name, updated: Date.now(), ...patch };
   // An empty record is noise in a file that syncs; match the desktop and drop it.
-  if (!next.rating && !(next.tags || []).length && !(next.models || []).length) {
+  if (!next.rating && !(next.tags || []).length) {
     delete state.library.records[key];
   } else state.library.records[key] = next;
   state.dirty = true;
@@ -346,13 +346,11 @@ function filterByName(list) {
     out = out.filter((item) => {
       const record = recordFor(item);
       const tags = (record.tags || []).join(' ').toLowerCase();
-      const models = (record.models || []).join(' ').toLowerCase();
       const hay = item.name.toLowerCase();
       return terms.every((term) => {
         if (term.startsWith('#')) return tags.includes(term.slice(1));
-        if (term.startsWith('@')) return models.includes(term.slice(1));
-        // A bare term searches everything: name, tags and models.
-        return hay.includes(term) || tags.includes(term) || models.includes(term);
+        // A bare term searches both the name and the tags.
+        return hay.includes(term) || tags.includes(term);
       });
     });
   }
@@ -523,7 +521,7 @@ function tagSelection() {
  */
 function newAdvFilter() {
   return {
-    text: '', tags: new Set(), models: new Set(), tagMode: 'all',
+    text: '', tags: new Set(), tagMode: 'all',
     ratings: new Set(), folders: new Set(),
   };
 }
@@ -532,7 +530,7 @@ let adv = newAdvFilter();
 let advDraft = newAdvFilter();
 
 function advActive(f = adv) {
-  return Boolean(f.text) || f.tags.size || f.models.size || f.ratings.size || f.folders.size;
+  return Boolean(f.text) || f.tags.size || f.ratings.size || f.folders.size;
 }
 
 /** Everything in use for a field across the whole library, not just this folder. */
@@ -557,12 +555,9 @@ function matchesAdv(video) {
   const record = recordFor(video);
   if (adv.ratings.size && !adv.ratings.has(record.rating || 0)) return false;
 
-  // Each facet is checked on its own: two models and one tag means "those
-  // models AND that tag", not one merged pool.
-  for (const field of ['tags', 'models']) {
-    if (!adv[field].size) continue;
-    const have = new Set((record[field] || []).map((t) => t.toLowerCase()));
-    const wanted = [...adv[field]].map((t) => t.toLowerCase());
+  if (adv.tags.size) {
+    const have = new Set((record.tags || []).map((t) => t.toLowerCase()));
+    const wanted = [...adv.tags].map((t) => t.toLowerCase());
     const hit = adv.tagMode === 'any' ? wanted.some((t) => have.has(t)) : wanted.every((t) => have.has(t));
     if (!hit) return false;
   }
@@ -575,7 +570,6 @@ function openAdv() {
   advDraft = {
     ...adv,
     tags: new Set(adv.tags),
-    models: new Set(adv.models),
     ratings: new Set(adv.ratings),
     folders: new Set(adv.folders),
   };
@@ -595,19 +589,14 @@ function renderAdv() {
     ));
   }
 
-  for (const [field, el, empty] of [
-    ['models', '#advModels', 'No models yet'],
-    ['tags', '#advTags', 'No tags yet'],
-  ]) {
-    const box = $(el);
-    const vocab = vocabulary(field);
-    box.innerHTML = vocab.length ? '' : `<span class="dim">${empty}</span>`;
-    for (const entry of vocab) {
-      box.appendChild(advChip(`${entry.tag} · ${entry.count}`, advDraft[field].has(entry.tag), () => {
-        toggleIn(advDraft[field], entry.tag);
-        renderAdv();
-      }));
-    }
+  const box = $('#advTags');
+  const vocab = vocabulary();
+  box.innerHTML = vocab.length ? '' : '<span class="dim">No tags yet</span>';
+  for (const entry of vocab) {
+    box.appendChild(advChip(`${entry.tag} · ${entry.count}`, advDraft.tags.has(entry.tag), () => {
+      toggleIn(advDraft.tags, entry.tag);
+      renderAdv();
+    }));
   }
   $('#advTagMode').textContent = advDraft.tagMode;
 
@@ -623,7 +612,6 @@ function renderAdv() {
 
   const bits = [];
   if (advDraft.folders.size) bits.push(`${advDraft.folders.size} folder${advDraft.folders.size === 1 ? '' : 's'}`);
-  if (advDraft.models.size) bits.push(`${advDraft.models.size} model${advDraft.models.size === 1 ? '' : 's'}`);
   if (advDraft.tags.size) bits.push(`${advDraft.tags.size} tag${advDraft.tags.size === 1 ? '' : 's'}`);
   if (advDraft.ratings.size) bits.push(`${advDraft.ratings.size} rating${advDraft.ratings.size === 1 ? '' : 's'}`);
   $('#advSummary').textContent = bits.join(' · ') || 'no filters';
@@ -880,40 +868,32 @@ function buildCard(video) {
   return card;
 }
 
-/**
- * Models and tags are the same shape, so one builder covers both — mirroring the
- * desktop, where they stay separate fields rather than a tag naming convention.
- */
-function buildLabelChips(video, field, row) {
+function buildTagChips(video, row) {
   const record = recordFor(video);
-  const prefix = field === 'models' ? '@' : '#';
   const chips = document.createElement('span');
   chips.className = 'chips';
 
-  for (const value of record[field] || []) {
+  for (const value of record.tags || []) {
     const chip = document.createElement('button');
-    chip.className = 'chip' + (field === 'models' ? ' chip-model' : '');
+    chip.className = 'chip';
     chip.textContent = value;
     chip.addEventListener('click', (ev) => {
       ev.stopPropagation();
-      $('#search').value = prefix + value;
-      state.query = (prefix + value).toLowerCase();
+      $('#search').value = '#' + value;
+      state.query = ('#' + value).toLowerCase();
       render();
     });
     chips.appendChild(chip);
   }
 
   const add = document.createElement('button');
-  add.className = 'chip add' + (field === 'models' ? ' chip-model' : '');
-  add.textContent = (record[field] || []).length ? '+' : (field === 'models' ? '+ model' : '+ tag');
+  add.className = 'chip add';
+  add.textContent = (record.tags || []).length ? '+' : '+ tag';
   add.addEventListener('click', (ev) => {
     ev.stopPropagation();
-    const typed = window.prompt(
-      field === 'models' ? 'Models, comma separated' : 'Tags, comma separated',
-      (record[field] || []).join(', '),
-    );
+    const typed = window.prompt('Tags, comma separated', (record.tags || []).join(', '));
     if (typed === null) return;
-    editRecord(video, { [field]: typed.split(',').map((t) => t.trim()).filter(Boolean) });
+    editRecord(video, { tags: typed.split(',').map((t) => t.trim()).filter(Boolean) });
     row.replaceWith(buildRecordRow(video));
   });
   chips.appendChild(add);
@@ -940,8 +920,7 @@ function buildRecordRow(video) {
   }
   row.appendChild(stars);
 
-  row.appendChild(buildLabelChips(video, 'models', row));
-  row.appendChild(buildLabelChips(video, 'tags', row));
+  row.appendChild(buildTagChips(video, row));
   return row;
 }
 

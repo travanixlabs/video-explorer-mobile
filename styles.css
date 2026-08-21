@@ -295,9 +295,6 @@ main { padding: 0 12px 40px; }
 }
 
 .chips { display: flex; flex-wrap: wrap; gap: 5px; }
-/* Models read as people rather than attributes, so they get their own colour
-   and sit first — a name is the thing you scan for. */
-.chip-model { border-color: color-mix(in srgb, #f5b52b 45%, var(--border-strong)); color: #f0c060; }
 .chip {
   border: 1px solid var(--border-strong);
   background: var(--bg-elev-2);
