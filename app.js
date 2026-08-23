@@ -407,6 +407,28 @@ function filterByName(list) {
  * Sorts videos, leaving folders where they are — they render in their own
  * section, so ordering them by rating would be meaningless.
  */
+/** Which label a sort key reads, and what it reads out of it. */
+const LABEL_SORTS = {
+  studio: (v) => (recordFor(v).studio || '').trim(),
+  models: (v) => firstAlphabetically(recordFor(v).models),
+  tags: (v) => firstAlphabetically(recordFor(v).tags),
+};
+
+/**
+ * The name a list sorts under: the alphabetically first, taken by comparing
+ * rather than by reading element zero, so a record written by hand sorts the
+ * same as one the app wrote.
+ */
+function firstAlphabetically(values) {
+  let best = '';
+  for (const raw of values || []) {
+    const value = String(raw).trim();
+    if (!value) continue;
+    if (!best || value.localeCompare(best, undefined, { sensitivity: 'base' }) < 0) best = value;
+  }
+  return best;
+}
+
 function sortVideos(list) {
   const dir = state.sortDir === 'asc' ? 1 : -1;
   const key = state.sort;
@@ -419,6 +441,18 @@ function sortVideos(list) {
       cmp = (recordFor(a).rating || 0) - (recordFor(b).rating || 0);
       // Returned unflipped: within one rating band names should read A→Z
       // whichever way the ratings point, or the unrated bulk comes out backwards.
+      if (cmp === 0) return a.name.localeCompare(b.name, undefined, { numeric: true });
+    } else if (LABEL_SORTS[key]) {
+      // By a label: its first value, since a video has one studio but any
+      // number of performers. Unlabelled last whichever way the arrow points,
+      // like the unrated — reversing should bring the labelled tail up, not a
+      // wall of blanks.
+      const av = LABEL_SORTS[key](a);
+      const bv = LABEL_SORTS[key](b);
+      if (!av && !bv) return a.name.localeCompare(b.name, undefined, { numeric: true });
+      if (!av) return 1;
+      if (!bv) return -1;
+      cmp = av.localeCompare(bv, undefined, { numeric: true, sensitivity: 'base' });
       if (cmp === 0) return a.name.localeCompare(b.name, undefined, { numeric: true });
     } else if (key === 'folder') {
       // Only meaningful flattened, which is the only time a listing mixes
