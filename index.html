@@ -145,6 +145,13 @@
       <button id="favClose" class="btn ghost">✕</button>
     </header>
     <div class="adv-body">
+      <!-- Tags only: this asks which videos count towards the ranking. -->
+      <div class="adv-label">
+        Count only videos tagged
+        <button id="favTagMode" class="mode">all</button>
+        <button id="favClear" class="mode" hidden>clear</button>
+      </div>
+      <div id="favTags" class="chip-row fav-tags"></div>
       <p id="favHint" class="dim"></p>
       <div id="favList" class="fav-list"></div>
     </div>

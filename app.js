@@ -682,15 +682,43 @@ function openSettings() {
 const STAR_POINTS = [0, 0, 0, 10, 100, 1000];
 
 /**
+ * Which videos a ranking is allowed to count, by tag — the desktop's
+ * `library.tagFilter`, over the same sidecar. Null when nothing is asked, so the
+ * caller can skip a predicate that always says yes.
+ */
+function tagKeep() {
+  const wanted = picked(favTags, 'in').map((t) => t.toLowerCase());
+  const banned = picked(favTags, 'out').map((t) => t.toLowerCase());
+  const none = favTags.get(NOTHING) || '';
+  if (!wanted.length && !banned.length && !none) return null;
+  const any = favTagMode === 'any';
+
+  return (record) => {
+    const have = new Set((record.tags || []).map((t) => String(t).toLowerCase()));
+    if (none === 'in' && have.size) return false;
+    if (none === 'out' && !have.size) return false;
+    if (wanted.length) {
+      const hit = any ? wanted.some((t) => have.has(t)) : wanted.every((t) => have.has(t));
+      if (!hit) return false;
+    }
+    return !banned.some((t) => have.has(t));
+  };
+}
+
+/**
  * The twenty performers with the best-rated work, by points — the desktop's
  * ranking, from the same sidecar.
+ *
+ * `keep` narrows which videos count at all, which re-ranks rather than
+ * highlights: filter to one tag and this becomes the top twenty *for that tag*.
  *
  * Ties go to whoever has more well-rated videos, since ten fours and one five
  * score alike, and then alphabetically.
  */
-function topModels(limit = 20) {
+function topModels(limit = 20, keep = null) {
   const tally = new Map();
   for (const record of Object.values(state.library.records || {})) {
+    if (keep && !keep(record)) continue;
     const rating = Math.max(0, Math.min(5, Math.round(Number(record.rating) || 0)));
     for (const raw of record.models || []) {
       const name = String(raw).trim();
@@ -720,10 +748,13 @@ function topModels(limit = 20) {
  * costs no network — the size and modified time come from the record's own key,
  * which is what lets the still be looked up later.
  */
-function videosForModel(name) {
+function videosForModel(name, keep = null) {
   const wanted = name.toLowerCase();
   const found = [];
   for (const [key, record] of Object.entries(state.library.records || {})) {
+    // The same test as the ranking, or a row would show work that did not count
+    // towards the score beside it.
+    if (keep && !keep(record)) continue;
     const rating = record.rating || 0;
     if (rating < 3) continue; // a two or a one scored nothing, so it shows nothing
     if (!(record.models || []).some((m) => String(m).toLowerCase() === wanted)) continue;
@@ -794,15 +825,75 @@ async function fillStills(rows) {
 
 const favItems = new Map();
 
+/**
+ * Which videos the ranking counts, by tag. The same Map-of-tag → 'in' | 'out'
+ * shape as a facet of the advanced filter, so the chips and cycling are shared,
+ * and kept out here so a filter survives closing the panel.
+ */
+let favTags = new Map();
+let favTagMode = 'all';
+
+const favFiltered = () => favTags.size > 0;
+
+/**
+ * What the filter is doing, in words — a re-ranked list looks exactly like an
+ * unfiltered one, so the panel has to say why the order changed.
+ */
+function favScope() {
+  if (!favFiltered()) return '';
+  const bits = [];
+  const none = favTags.get(NOTHING);
+  if (none === 'in') bits.push('with no tags at all');
+  if (none === 'out') bits.push('with at least one tag');
+  const wanted = picked(favTags, 'in');
+  if (wanted.length) bits.push(`tagged ${wanted.join(favTagMode === 'any' ? ' or ' : ' and ')}`);
+  const banned = picked(favTags, 'out');
+  if (banned.length) bits.push(`not tagged ${banned.join(' or ')}`);
+  return ` Counting only videos ${bits.join(', ')} — so this is the top twenty for that.`;
+}
+
+/** The tag chips above the ranking. Every tap re-ranks, so there is no Apply. */
+function renderFavTags() {
+  $('#favTagMode').textContent = favTagMode;
+  $('#favClear').hidden = !favFiltered();
+
+  const box = $('#favTags');
+  box.innerHTML = '';
+
+  // First, because "who has untagged work" is a question about the whole
+  // library rather than one more tag in it.
+  const gap = advChip('no tags', favTags.get(NOTHING), () => {
+    cycleIn(favTags, NOTHING);
+    openFavourites();
+  });
+  gap.classList.add('chip-none');
+  box.appendChild(gap);
+
+  const vocab = vocabularyByName('tags');
+  if (!vocab.length) box.insertAdjacentHTML('beforeend', '<span class="dim">No tags yet</span>');
+  for (const entry of vocab) {
+    box.appendChild(advChip(`${entry.tag} · ${entry.count}`, favTags.get(entry.tag), () => {
+      cycleIn(favTags, entry.tag);
+      openFavourites();
+    }));
+  }
+}
+
 function openFavourites() {
   const list = $('#favList');
   list.innerHTML = '';
   $('#fav').hidden = false;
+  renderFavTags();
 
-  const models = topModels(20);
+  const keep = tagKeep();
+  const models = topModels(20, keep);
+  const weights = 'A five-star video is worth a thousand points, a four-star a hundred,'
+    + ' a three-star ten, everything else nothing.';
   $('#favHint').textContent = models.length
-    ? 'A five-star video is worth a thousand points, a four-star a hundred, a three-star ten, everything else nothing. Tap a name for everything of theirs, or a still to play it.'
-    : 'Nothing to rank yet — rate a few videos three stars or better and name who is in them.';
+    ? `${weights}${favScope()} Tap a name for everything of theirs, or a still to play it.`
+    : favFiltered()
+      ? 'Nobody has a rated video matching those tags.'
+      : 'Nothing to rank yet — rate a few videos three stars or better and name who is in them.';
 
   for (const [index, entry] of models.entries()) {
     const row = document.createElement('div');
@@ -825,7 +916,7 @@ function openFavourites() {
     line.addEventListener('click', () => showModel(entry.name));
     row.appendChild(line);
 
-    row.appendChild(buildStrip(videosForModel(entry.name), entry.name));
+    row.appendChild(buildStrip(videosForModel(entry.name, keep), entry.name));
     favObserver.observe(row);
     list.appendChild(row);
   }
@@ -898,6 +989,10 @@ async function showModel(name) {
   $('#fav').hidden = true;
   adv = newAdvFilter();
   adv.models.set(name, 'in');
+  // Carried over: arriving from "the top twenty for this tag" and landing on
+  // everything they have ever done would contradict the ranking that sent you.
+  adv.tags = new Map(favTags);
+  adv.mode.tags = favTagMode;
   advDraft = newAdvFilter();
   $('#search').value = '';
   state.query = '';
@@ -2133,6 +2228,18 @@ async function boot() {
   });
   $('#favBtn').addEventListener('click', openFavourites);
   $('#favClose').addEventListener('click', () => { $('#fav').hidden = true; });
+
+  // The tag filter re-ranks on every tap: there is nothing to apply, since the
+  // list underneath *is* the result.
+  $('#favTagMode').addEventListener('click', () => {
+    favTagMode = favTagMode === 'all' ? 'any' : 'all';
+    openFavourites();
+  });
+  $('#favClear').addEventListener('click', () => {
+    favTags = new Map();
+    favTagMode = 'all';
+    openFavourites();
+  });
   $('#selTag').addEventListener('click', tagSelection);
   $('#selMove').addEventListener('click', openMovePicker);
   $('#pickerClose').addEventListener('click', () => { $('#picker').hidden = true; });
@@ -2200,7 +2307,7 @@ if (location.hash === '#debug') {
     render, renderAdv, openAdv, applyAdv, resetAdv, filterByLabel,
     openLabels, commitLabels, renderLabelSuggestions,
     buildCard, buildRecordRow, buildFolderLine, filterByName, sortVideos,
-    topModels, videosForModel, openFavourites, showModel, buildStrip,
+    topModels, videosForModel, tagKeep, openFavourites, renderFavTags, showModel, buildStrip,
     atRoot, isLibraryFolder,
     openPlayer, beginPlayback, startPreview, stopPreview, followListing,
     deleteSelection, openSettings, loadSettings, applyCardWidth,
