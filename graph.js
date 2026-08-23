@@ -89,6 +89,13 @@ function normalise(item) {
   };
 }
 
+let PAGE = 200;
+
+/** How many items a listing call asks for. Clamped to what Graph will serve. */
+export function setPageSize(size) {
+  PAGE = Math.max(20, Math.min(999, Number(size) || 200));
+}
+
 function childrenUrl(driveId, itemId, query) {
   return driveId && itemId
     ? `${itemBase(driveId, itemId)}/children${query}`
@@ -136,7 +143,7 @@ export async function listFolders(driveId, itemId) {
  */
 export async function listPage(driveId, itemId, next = null) {
   const page = await call(next
-    || childrenUrl(driveId, itemId, `?$select=${SELECT}&$top=200&$orderby=name`));
+    || childrenUrl(driveId, itemId, `?$select=${SELECT}&$top=${PAGE}&$orderby=name`));
 
   // Folders are ignored here — listFolders() has them, and taking them from a
   // partially-loaded listing is what hid one in the first place.
@@ -158,7 +165,7 @@ export async function listPage(driveId, itemId, next = null) {
  * one folder at a time -- and the default ordering is the cheaper one.
  */
 export async function listChildren(driveId, itemId, next = null) {
-  const page = await call(next || childrenUrl(driveId, itemId, `?$select=${SELECT}&$top=200`));
+  const page = await call(next || childrenUrl(driveId, itemId, `?$select=${SELECT}&$top=${PAGE}`));
   const entries = (page.value || []).map(normalise);
   return {
     videos: entries.filter((e) => e.video),
@@ -237,6 +244,14 @@ export async function moveItem(item, dest) {
   });
 }
 
+/**
+ * To the recycle bin, not gone: Graph's DELETE on a drive item is a soft delete,
+ * and it is the same operation the OneDrive web UI performs.
+ */
+export async function deleteItem(item) {
+  await call(itemBase(item.driveId, item.id), { method: 'DELETE' });
+}
+
 export async function itemById(driveId, itemId) {
   return normalise(await call(`${itemBase(driveId, itemId)}?$expand=thumbnails`));
 }
@@ -276,6 +291,75 @@ export async function saveLibrary(library) {
 }
 
 /** Must match library.js on the desktop exactly, or records will not line up. */
+/**
+ * Finds the items behind a set of sidecar records.
+ *
+ * The sidecar is keyed by size and modified time, deliberately — that survives a
+ * rename, which an item id would too but a path would not. The cost is that a
+ * record on its own cannot be turned back into something Graph will serve, and
+ * the favourites list is exactly that: names and ratings with no items.
+ *
+ * So each one is searched for by filename and then confirmed on size and
+ * modified time, which is what makes a common name safe. Searches go up in
+ * batches of twenty, and a hit is worth caching for the session: the answer
+ * cannot change unless the file does, and if the file changes its key changes
+ * with it.
+ *
+ * Shared-with-me items are not in this index. Those simply come back unfound,
+ * which costs a blank tile rather than a wrong one.
+ */
+const foundItems = new Map();
+
+export async function findVideos(wanted) {
+  const answers = new Map();
+  const todo = [];
+  for (const item of wanted) {
+    const key = `${item.size}:${Math.round(item.mtime)}`;
+    if (foundItems.has(key)) {
+      const hit = foundItems.get(key);
+      if (hit) answers.set(key, hit);
+    } else todo.push({ ...item, key });
+  }
+  if (!todo.length) return answers;
+
+  const token = await accessToken();
+  for (let at = 0; at < todo.length; at += 20) {
+    const slice = todo.slice(at, at + 20);
+    let body;
+    try {
+      const res = await fetch(`${BASE}/$batch`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requests: slice.map((item, index) => ({
+            id: String(index),
+            method: 'GET',
+            // Doubled apostrophes: an OData string literal escapes them that
+            // way, and plenty of these names have one in them.
+            url: `/me/drive/root/search(q='${encodeURIComponent(item.name.replace(/'/g, "''"))}')`
+              + `?$select=${SELECT}&$top=12`,
+          })),
+        }),
+      });
+      if (!res.ok) return answers;
+      body = await res.json();
+    } catch {
+      return answers; // no stills is a lesser failure than no list
+    }
+
+    for (const response of body.responses || []) {
+      const asked = slice[Number(response.id)];
+      if (!asked) continue;
+      const hits = response.status === 200 ? ((response.body || {}).value || []) : [];
+      const match = hits.map(normalise).find((candidate) => candidate.size === asked.size
+        && Math.round(candidate.mtime) === Math.round(asked.mtime));
+      foundItems.set(asked.key, match || null);
+      if (match) answers.set(asked.key, match);
+    }
+  }
+  return answers;
+}
+
 export function recordKey(video) {
   return `${video.size}:${Math.round(video.mtime)}`;
 }

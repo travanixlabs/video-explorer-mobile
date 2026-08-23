@@ -31,8 +31,16 @@
         <option value="size">Size</option>
         <option value="duration">Length</option>
         <option value="rating" selected>Rating</option>
+        <option value="folder">Folder</option>
       </select>
       <button id="sortDir" class="btn icon" title="Reverse order">↓</button>
+      <button id="setBtn" class="btn icon" title="Settings">⚙</button>
+      <button id="favBtn" class="btn icon" title="Top performers">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+          <path d="M8 1.6l1.95 3.95 4.35.63-3.15 3.07.75 4.33L8 11.53l-3.9 2.05.75-4.33L1.7 6.18l4.35-.63z"
+                fill="currentColor"/>
+        </svg>
+      </button>
       <button id="advBtn" class="btn icon" title="Advanced filters">
         <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
           <path d="M1.5 2.5h13L9.5 8.6v4.2l-3 1.7V8.6z" fill="none" stroke="currentColor"
@@ -61,6 +69,7 @@
     <span id="selStars" class="stars"></span>
     <button id="selTag" class="btn">Tags…</button>
     <button id="selMove" class="btn">Move…</button>
+    <button id="selDelete" class="btn danger">Delete</button>
     <button id="selAll" class="btn ghost">All</button>
     <button id="selClear" class="btn ghost">✕</button>
   </div>
@@ -102,6 +111,40 @@
       <span id="advSummary" class="dim"></span>
       <button id="advApply" class="btn primary">Apply</button>
     </footer>
+  </div>
+</div>
+
+<div id="settings" class="picker" hidden>
+  <div class="picker-card">
+    <header class="picker-head">
+      <span>Settings</span>
+      <button id="settingsClose" class="btn ghost">✕</button>
+    </header>
+    <div class="adv-body">
+      <div class="adv-label">Card width <span id="setCardWidthLabel" class="dim"></span></div>
+      <input id="setCardWidth" type="range" min="240" max="640" step="20">
+      <div class="adv-label">Videos per fetch</div>
+      <select id="setPageSize" class="sort-select">
+        <option value="50">50</option>
+        <option value="100">100</option>
+        <option value="200">200</option>
+        <option value="400">400</option>
+      </select>
+      <p class="adv-how">Kept on this device, not in the library file.</p>
+    </div>
+  </div>
+</div>
+
+<div id="fav" class="picker" hidden>
+  <div class="picker-card">
+    <header class="picker-head">
+      <span>Top performers</span>
+      <button id="favClose" class="btn ghost">✕</button>
+    </header>
+    <div class="adv-body">
+      <p id="favHint" class="dim"></p>
+      <div id="favList" class="fav-list"></div>
+    </div>
   </div>
 </div>
 
@@ -153,13 +196,18 @@
   <div class="player-bar">
     <span id="playerName" class="player-name"></span>
     <span id="playerPos" class="player-pos"></span>
+    <button id="playerSound" class="btn ghost" title="Sound">🔇</button>
+    <button id="playerInfoBtn" class="btn ghost" title="Details">ⓘ</button>
     <button id="playerClose" class="btn ghost">✕</button>
   </div>
   <div class="player-stage">
-    <video id="playerVideo" controls playsinline preload="metadata"></video>
+    <video id="playerVideo" playsinline preload="metadata"></video>
+    <span id="playerBadge" class="player-badge" hidden></span>
+    <button id="playerPlay" class="player-play" title="Play from the start" hidden>▶</button>
     <button id="playerPrev" class="player-nav prev" aria-label="Previous video">‹</button>
     <button id="playerNext" class="player-nav next" aria-label="Next video">›</button>
   </div>
+  <div id="playerInfo" class="player-info" hidden></div>
 </div>
 
 <div id="status" class="busy" hidden></div>

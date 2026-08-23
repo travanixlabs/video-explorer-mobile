@@ -25,6 +25,8 @@ const state = {
   queue: [],          // folders the walk has seen but not visited yet
   playingId: null,    // which video the player has open, for swipe-to-next
   selecting: false,   // selection mode: taps toggle instead of scrubbing
+  cardWidth: 320,     // per-device, not a judgement about a video; the CSS default
+  pageSize: 200,
   selected: new Set(), // item ids
 };
 
@@ -418,6 +420,12 @@ function sortVideos(list) {
       // Returned unflipped: within one rating band names should read A→Z
       // whichever way the ratings point, or the unrated bulk comes out backwards.
       if (cmp === 0) return a.name.localeCompare(b.name, undefined, { numeric: true });
+    } else if (key === 'folder') {
+      // Only meaningful flattened, which is the only time a listing mixes
+      // folders — and within one folder it falls back to the name.
+      cmp = String(a.folderName || '').localeCompare(String(b.folderName || ''),
+        undefined, { numeric: true, sensitivity: 'base' });
+      if (cmp === 0) return a.name.localeCompare(b.name, undefined, { numeric: true });
     } else {
       cmp = (Number(a[key]) || 0) - (Number(b[key]) || 0);
     }
@@ -533,6 +541,289 @@ function updateSelectionBar() {
 
 function tagSelection() {
   openLabels(selectedVideos());
+}
+
+/**
+ * Deletes the selection, to the OneDrive recycle bin rather than for good.
+ *
+ * Named in the confirmation, and one at a time so a failure part-way through
+ * says which ones went. The sidecar records go with them: a record keyed to
+ * bytes that no longer exist is dead weight in a file that syncs.
+ */
+async function deleteSelection() {
+  const picked = selectedVideos();
+  if (!picked.length) return;
+  const many = picked.length === 1;
+  const asked = window.confirm(many
+    ? `Delete "${picked[0].name}"?\n\nIt goes to the OneDrive recycle bin.`
+    : `Delete these ${picked.length} videos?\n\nThey go to the OneDrive recycle bin.`);
+  if (!asked) return;
+
+  let gone = 0;
+  setBusy('Deleting…');
+  for (const video of picked) {
+    try {
+      await graph.deleteItem(video);
+      delete state.library.records[graph.recordKey(video)];
+      state.dirty = true;
+      state.videos = state.videos.filter((v) => v.id !== video.id);
+      state.selected.delete(video.id);
+      gone += 1;
+    } catch (err) {
+      toast(`${video.name}: ${err.message}`, 'err');
+      break;
+    }
+  }
+  setBusy('');
+  scheduleSave();
+  exitSelection();
+  gridKey = '';
+  render();
+  toast(`Deleted ${gone} video${gone === 1 ? '' : 's'}`, 'ok');
+}
+
+/**
+ * How wide a card is, and how much a "load more" fetches. Both are per-device
+ * rather than shared through the sidecar: a phone and a desktop browser want
+ * different answers, and the sidecar is for judgements about videos.
+ */
+const SETTINGS_KEY = 've.settings';
+
+function loadSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+    if (Number(saved.cardWidth)) state.cardWidth = Number(saved.cardWidth);
+    if (Number(saved.pageSize)) state.pageSize = Number(saved.pageSize);
+  } catch { /* first run, or storage blocked */ }
+  applyCardWidth();
+  graph.setPageSize(state.pageSize);
+}
+
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+      cardWidth: state.cardWidth, pageSize: state.pageSize,
+    }));
+  } catch { /* private mode: the setting just does not outlive the tab */ }
+}
+
+function applyCardWidth() {
+  document.documentElement.style.setProperty('--card-width', state.cardWidth + 'px');
+}
+
+function openSettings() {
+  $('#setCardWidth').value = String(state.cardWidth);
+  $('#setCardWidthLabel').textContent = state.cardWidth + 'px';
+  $('#setPageSize').value = String(state.pageSize);
+  $('#settings').hidden = false;
+}
+
+// -------------------------------------------------------------- favourites
+
+/** The ratings that recommend someone. Two and one are a verdict against. */
+const GOOD_STARS = [5, 4, 3];
+
+/**
+ * A top ten per rating, five down to three, and nobody twice — the desktop's
+ * ranking, computed here from the same sidecar.
+ *
+ * A tier is about one rating and nothing else: it ranks on how many videos of
+ * exactly that rating someone has, breaks ties on that count and then
+ * alphabetically, and anyone already placed higher is left out below.
+ */
+function topModelsByStar(limit = 10) {
+  const tally = new Map();
+  for (const record of Object.values(state.library.records || {})) {
+    const rating = Math.max(0, Math.min(5, Math.round(Number(record.rating) || 0)));
+    for (const raw of record.models || []) {
+      const name = String(raw).trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      let entry = tally.get(key);
+      if (!entry) {
+        entry = { name, counts: [0, 0, 0, 0, 0, 0], videos: 0 };
+        tally.set(key, entry);
+      }
+      entry.counts[rating] += 1;
+      entry.videos += 1;
+    }
+  }
+
+  const all = [...tally.values()];
+  const taken = new Set();
+  return GOOD_STARS.map((star) => {
+    const models = all
+      .filter((e) => e.counts[star] > 0 && !taken.has(e.name.toLowerCase()))
+      .sort((a, b) => b.counts[star] - a.counts[star] || a.name.localeCompare(b.name))
+      .slice(0, limit);
+    for (const entry of models) taken.add(entry.name.toLowerCase());
+    return { star, models };
+  });
+}
+
+/**
+ * The videos that put someone in a tier: that rating only, biggest file first.
+ *
+ * Read straight out of the sidecar, so the list needs no network at all — the
+ * size and modified time come from the record's own key, which is what lets the
+ * still be looked up later.
+ */
+function videosForModel(name, star, count) {
+  const wanted = name.toLowerCase();
+  const found = [];
+  for (const [key, record] of Object.entries(state.library.records || {})) {
+    if ((record.rating || 0) !== star) continue;
+    if (!(record.models || []).some((m) => String(m).toLowerCase() === wanted)) continue;
+    const [size, mtime] = key.split(':').map(Number);
+    found.push({ key, name: record.name || '', size: size || 0, mtime: mtime || 0 });
+  }
+  found.sort((a, b) => b.size - a.size || a.name.localeCompare(b.name));
+  return found.slice(0, count);
+}
+
+/**
+ * Stills arrive in two hops — search for the item, then batch its thumbnail —
+ * so they load as a row scrolls into view rather than all at once. Thirty
+ * performers would otherwise be a hundred and fifty searches for a panel
+ * showing three rows.
+ */
+const favObserver = new IntersectionObserver((entries) => {
+  const rows = entries.filter((e) => e.isIntersecting).map((e) => e.target);
+  for (const row of rows) favObserver.unobserve(row);
+  if (rows.length) fillStills(rows);
+}, { rootMargin: '200px 0px' });
+
+async function fillStills(rows) {
+  const shots = rows.flatMap((row) => [...row.querySelectorAll('.fav-shot')]);
+  const wanted = shots.map((shot) => ({
+    name: shot.dataset.name, size: Number(shot.dataset.size), mtime: Number(shot.dataset.mtime),
+  })).filter((w) => w.name);
+  if (!wanted.length) return;
+
+  let items;
+  try {
+    items = await graph.findVideos(wanted);
+  } catch {
+    return;
+  }
+
+  const byShot = new Map();
+  for (const shot of shots) {
+    const item = items.get(`${shot.dataset.size}:${Math.round(Number(shot.dataset.mtime))}`);
+    if (item) byShot.set(shot, item);
+  }
+  if (!byShot.size) return;
+
+  // The item is kept on the element: tapping the still has to open that video,
+  // and this is the only place its id is known.
+  for (const [shot, item] of byShot) {
+    shot.dataset.id = item.id;
+    shot.dataset.drive = item.driveId;
+    favItems.set(item.id, item);
+  }
+
+  try {
+    const thumbs = await graph.thumbnailsFor([...byShot.values()]);
+    for (const [shot, item] of byShot) {
+      const url = thumbs.get(item.id);
+      if (url) shot.style.backgroundImage = `url("${url}")`;
+    }
+  } catch { /* the tile stays blank */ }
+}
+
+const favItems = new Map();
+
+function openFavourites() {
+  const list = $('#favList');
+  list.innerHTML = '';
+  $('#fav').hidden = false;
+
+  const tiers = topModelsByStar(10);
+  const anyone = tiers.some((tier) => tier.models.length);
+  $('#favHint').textContent = anyone
+    ? 'A top ten per rating, and nobody twice. Tap a name for everything of theirs, or a still to play it.'
+    : 'Nothing to rank yet — rate a few videos that have a performer on them.';
+
+  for (const tier of tiers) {
+    if (!tier.models.length) continue;
+
+    const head = document.createElement('div');
+    head.className = 'fav-head';
+    head.innerHTML = `<span class="fav-head-stars">${'★'.repeat(tier.star)}</span>`
+      + `<span class="dim">top ${tier.models.length}${tier.star < 5 ? ', of whoever is left' : ''}</span>`;
+    list.appendChild(head);
+
+    for (const [index, entry] of tier.models.entries()) {
+      const row = document.createElement('div');
+      row.className = 'fav-row';
+
+      const line = document.createElement('div');
+      line.className = 'fav-line';
+      line.innerHTML = `<span class="fav-rank">${index + 1}</span>`
+        + `<span class="fav-name"></span>`
+        + `<span class="chip fav-count">${entry.counts[tier.star]}×${'★'.repeat(tier.star)}</span>`
+        + `<span class="fav-total dim">${entry.videos} video${entry.videos === 1 ? '' : 's'}</span>`;
+      line.querySelector('.fav-name').textContent = entry.name;
+      line.addEventListener('click', () => showModel(entry.name));
+      row.appendChild(line);
+
+      const strip = document.createElement('div');
+      strip.className = 'fav-shots';
+      for (const video of videosForModel(entry.name, tier.star, 5)) {
+        const shot = document.createElement('div');
+        shot.className = 'fav-shot';
+        shot.dataset.name = video.name;
+        shot.dataset.size = String(video.size);
+        shot.dataset.mtime = String(video.mtime);
+        shot.title = video.name;
+        shot.innerHTML = `<span class="fav-shot-rating">${tier.star}</span>`;
+        shot.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          playFromStill(shot, entry.name);
+        });
+        strip.appendChild(shot);
+      }
+      row.appendChild(strip);
+      favObserver.observe(row);
+      list.appendChild(row);
+    }
+  }
+}
+
+/**
+ * Everything by one performer: the drive root with the subfolders flattened,
+ * because their videos are spread across studio folders and the answer is never
+ * inside the folder you happen to be standing in.
+ */
+async function showModel(name) {
+  $('#fav').hidden = true;
+  adv = newAdvFilter();
+  adv.models.set(name, 'in');
+  advDraft = newAdvFilter();
+  $('#search').value = '';
+  state.query = '';
+  $('#advDot').hidden = false;
+  $('#advBtn').classList.add('on');
+  state.sort = 'rating';
+  state.sortDir = 'desc';
+  $('#sortSelect').value = 'rating';
+  state.flatten = true;
+  $('#flatBtn').classList.add('on');
+  toast(`Looking for ${name} across everything…`, 'ok');
+  await openFolder(null);
+}
+
+/** A still is a video, so tapping one plays it. */
+async function playFromStill(shot, name) {
+  const item = shot.dataset.id ? favItems.get(shot.dataset.id) : null;
+  if (!item) {
+    toast('Still finding that one — try again in a moment', 'err');
+    return;
+  }
+  $('#fav').hidden = true;
+  // The player walks whatever is listed, so put their videos behind it first.
+  if (!state.videos.some((v) => v.id === item.id)) state.videos.unshift(item);
+  await openPlayer(item);
 }
 
 // -------------------------------------------------------- advanced filters
@@ -1199,6 +1490,20 @@ function renderLabelSuggestions() {
   }
 }
 
+/**
+ * An edit can take the open video out of the listing — rating it while looking
+ * at the unrated. That edit is you finishing with it, so the player follows the
+ * listing rather than sitting on something no longer in it.
+ */
+function followListing(before) {
+  if ($('#player').hidden || !state.playingId) return;
+  const list = playerList();
+  if (list.some((v) => v.id === state.playingId)) return;
+  if (!list.length) { closePlayer(); return; }
+  const at = before.findIndex((v) => v.id === state.playingId);
+  openPlayer(list[Math.min(at < 0 ? 0 : at, list.length - 1)]);
+}
+
 function commitLabels(mode) {
   const tags = parseList($('#labelTags').value);
   const models = parseList($('#labelModels').value);
@@ -1218,7 +1523,9 @@ function commitLabels(mode) {
     editRecord(video, patch);
   }
 
+  const before = playerList();
   render();
+  followListing(before);
   const n = videos.length;
   toast(mode === 'replace'
     ? `Labels set on ${n} video${n === 1 ? '' : 's'}`
@@ -1238,8 +1545,10 @@ function buildRecordRow(video) {
     star.textContent = n <= (record.rating || 0) ? '★' : '☆';
     star.addEventListener('click', (ev) => {
       ev.stopPropagation();
+      const before = playerList();
       editRecord(video, { rating: n === record.rating ? 0 : n });
       row.replaceWith(buildRecordRow(video));
+      if (advActive()) { render(); followListing(before); }
     });
     stars.appendChild(star);
   }
@@ -1455,18 +1764,119 @@ function endScrub() {
  */
 let playerReturn = null;
 
+/**
+ * Sound is opted into once, for the run of the app, and never by pressing play.
+ *
+ * The desktop learned this the hard way: taking a play as consent meant a
+ * session could go loud without anyone having asked for it. The speaker in the
+ * player bar is the only way in, and a reload is quiet again.
+ */
+let soundOn = false;
+
+function setSoundOn(next) {
+  soundOn = Boolean(next);
+  const el = $('#playerVideo');
+  if (el && el.controls) el.muted = !soundOn;
+  syncSoundButton();
+}
+
+function syncSoundButton() {
+  const btn = $('#playerSound');
+  if (!btn) return;
+  btn.textContent = soundOn ? '🔊' : '🔇';
+  btn.title = soundOn ? 'Mute this session' : 'Turn sound on for this session';
+  btn.classList.toggle('on', soundOn);
+}
+
+/**
+ * The player opens on the same sampled preview the desktop shows: ten points
+ * through the file, a second each, muted, with the native controls held back
+ * until you commit. Scrubbing a preview is not scrubbing a playthrough, and its
+ * play button would be indistinguishable from the seeking this does.
+ *
+ * It is the one open stream being seeked, not ten requests — the same ranged
+ * URL the element is already reading.
+ */
+const preview = { timer: null, index: 0, count: 10 };
+
+function startPreview() {
+  stopPreview();
+  const el = $('#playerVideo');
+  el.controls = false;
+  el.muted = true;
+  $('#playerPlay').hidden = false;
+  $('#playerBadge').hidden = false;
+  preview.index = 0;
+
+  const show = (index) => {
+    preview.index = index;
+    const duration = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : 0;
+    if (!duration) return; // metadata still coming; the timer retries
+    const at = (duration / (preview.count + 1)) * (index + 1);
+    try { el.currentTime = at; } catch { return; }
+    el.play().catch(() => {});
+    $('#playerBadge').textContent = `${index + 1}/${preview.count} · ${fmtTime(at)}`;
+  };
+
+  el.addEventListener('loadedmetadata', () => show(0), { once: true });
+  if (el.readyState >= 1) show(0);
+  preview.timer = setInterval(() => show((preview.index + 1) % preview.count), 1000);
+}
+
+function stopPreview() {
+  clearInterval(preview.timer);
+  preview.timer = null;
+}
+
+/** The button turns the preview into a real playthrough, from the top. */
+function beginPlayback() {
+  stopPreview();
+  const el = $('#playerVideo');
+  $('#playerPlay').hidden = true;
+  $('#playerBadge').hidden = true;
+  el.controls = true;
+  el.muted = !soundOn;
+  try { el.currentTime = 0; } catch { /* not seekable yet; it starts at 0 anyway */ }
+  el.play().catch(() => {});
+}
+
+/** Everything about the open video, behind the ⓘ — there is no room for it. */
+function renderPlayerDetails(video) {
+  const box = $('#playerInfo');
+  box.innerHTML = '';
+  const bits = [
+    video.duration ? fmtTime(video.duration) : '',
+    video.width ? `${video.width}×${video.height}` : '',
+    video.bitrate ? `${Math.round(video.bitrate / 1000)} kbps` : '',
+    fmtBytes(video.size),
+    video.folderName || '',
+  ].filter(Boolean);
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.textContent = bits.join('  ·  ');
+  box.appendChild(meta);
+  box.appendChild(buildRecordRow(video));
+  box.appendChild(buildFolderLine(video));
+}
+
 async function openPlayer(video) {
   const modal = $('#player');
   const el = $('#playerVideo');
   if (modal.hidden) playerReturn = window.scrollY; // only the way in sets the mark
   state.playingId = video.id;
+  state.playingAnchor = null; // it is in the listing until an edit says otherwise
   syncPlayerNav();
   $('#playerName').textContent = video.name;
+  renderPlayerDetails(video);
+  $('#playerInfo').hidden = true;
+  syncSoundButton();
   modal.hidden = false;
   setBusy('Opening…');
   try {
     el.src = await graph.streamUrl(video.driveId, video.id);
-    await el.play().catch(() => {});
+    // Once you have asked for sound, opening a video means watching it.
+    if (soundOn) beginPlayback();
+    else startPreview();
   } catch (err) {
     toast(err.message, 'err');
     closePlayer();
@@ -1534,6 +1944,7 @@ function attachPlayerSwipe() {
 }
 
 function closePlayer() {
+  stopPreview(); // a timer left running would seek a src that has gone
   const el = $('#playerVideo');
   el.pause();
   el.removeAttribute('src');
@@ -1601,6 +2012,28 @@ async function boot() {
   for (const spec of Object.values(LABEL_INPUTS)) {
     $(spec.input).addEventListener('input', renderLabelSuggestions);
   }
+  $('#selDelete').addEventListener('click', deleteSelection);
+  $('#setBtn').addEventListener('click', openSettings);
+  $('#settingsClose').addEventListener('click', () => { $('#settings').hidden = true; });
+  $('#setCardWidth').addEventListener('input', (ev) => {
+    state.cardWidth = Number(ev.target.value) || 460;
+    $('#setCardWidthLabel').textContent = state.cardWidth + 'px';
+    applyCardWidth();
+    saveSettings();
+  });
+  $('#setPageSize').addEventListener('change', (ev) => {
+    state.pageSize = Number(ev.target.value) || 200;
+    graph.setPageSize(state.pageSize);
+    saveSettings();
+  });
+  $('#playerPlay').addEventListener('click', beginPlayback);
+  $('#playerSound').addEventListener('click', () => setSoundOn(!soundOn));
+  $('#playerInfoBtn').addEventListener('click', () => {
+    const box = $('#playerInfo');
+    box.hidden = !box.hidden;
+  });
+  $('#favBtn').addEventListener('click', openFavourites);
+  $('#favClose').addEventListener('click', () => { $('#fav').hidden = true; });
   $('#selTag').addEventListener('click', tagSelection);
   $('#selMove').addEventListener('click', openMovePicker);
   $('#pickerClose').addEventListener('click', () => { $('#picker').hidden = true; });
@@ -1644,6 +2077,7 @@ async function boot() {
     return;
   }
 
+  loadSettings();
   state.library = await graph.loadLibrary();
   await openFolder(null);
 }
@@ -1667,6 +2101,10 @@ if (location.hash === '#debug') {
     render, renderAdv, openAdv, applyAdv, resetAdv, filterByLabel,
     openLabels, commitLabels, renderLabelSuggestions,
     buildCard, buildRecordRow, buildFolderLine, filterByName, sortVideos,
+    topModelsByStar, videosForModel, openFavourites, showModel,
+    openPlayer, beginPlayback, startPreview, stopPreview, followListing,
+    deleteSelection, openSettings, loadSettings, applyCardWidth,
+    get soundOn() { return soundOn; }, setSoundOn, playerList,
   };
 }
 

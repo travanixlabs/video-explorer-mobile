@@ -155,8 +155,9 @@ main { padding: 0 12px 40px; }
   display: grid;
   gap: 14px;
   /* One column on a phone, more as the screen allows — the same markup works
-     on a tablet in landscape without a second layout. */
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
+     on a tablet in landscape without a second layout. The width is a setting,
+     capped at 100% so a wide choice still means one column on a phone. */
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--card-width, 320px)), 1fr));
 }
 
 .more {
@@ -360,6 +361,88 @@ main { padding: 0 12px 40px; }
   cursor: pointer;
 }
 .adv-how { margin: 0; color: var(--text-faint); font-size: 11px; }
+
+/* ------------------------------------------------------------- favourites */
+
+.fav-head { display: flex; align-items: baseline; gap: 8px; margin: 16px 0 6px; }
+.fav-head:first-child { margin-top: 4px; }
+.fav-head-stars { color: #f0c060; font-size: 13px; letter-spacing: 1px; }
+
+.fav-row { padding: 6px 0; }
+.fav-line { display: flex; align-items: baseline; gap: 8px; cursor: pointer; }
+.fav-rank { min-width: 16px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.fav-name { font-weight: 600; }
+/* The count that placed them. Green like a required filter chip, but without
+   the "+": it is a fact about them, not a decision you have made. */
+.chip.fav-count { border-color: #2f6b46; background: #16301f; color: #7fd6a0; }
+.fav-total { margin-left: auto; white-space: nowrap; font-size: 11px; }
+
+/* Stills scroll sideways: a phone cannot show five at a useful size and stay
+   one row, and wrapping would make every row a different height. */
+.fav-shots {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.fav-shot {
+  position: relative;
+  flex: none;
+  width: 118px;
+  height: 66px;
+  border-radius: 5px;
+  background: var(--bg-elev-2) center/cover no-repeat;
+  border: 1px solid var(--border);
+}
+.fav-shot-rating {
+  position: absolute;
+  right: 3px;
+  bottom: 2px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(14, 17, 22, .78);
+  color: #f0c060;
+  font-size: 11px;
+}
+
+/* ----------------------------------------------------------- player extras */
+
+/* The preview's play button and the segment counter, over the video. */
+.player-play {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: rgba(14, 17, 22, .62);
+  color: var(--text);
+  font-size: 22px;
+  cursor: pointer;
+}
+.player-badge {
+  position: absolute;
+  left: 10px;
+  top: 10px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: rgba(14, 17, 22, .78);
+  color: var(--text-dim);
+  font-size: 11px;
+}
+#playerSound.on { color: var(--accent); }
+
+/* The details panel: everything that will not fit in the bar. */
+.player-info {
+  padding: 10px 12px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+
+.btn.danger { border-color: #6b3535; color: #e8a0a0; }
 
 /* --------------------------------------------------------------- selection */
 
