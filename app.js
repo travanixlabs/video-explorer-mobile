@@ -674,11 +674,12 @@ function openSettings() {
 // -------------------------------------------------------------- favourites
 
 /**
- * What a rating is worth to a performer's standing. A five is worth ten fours;
- * everything else is worth nothing, since this ranks who is worth watching and
- * a three is a video you sat through rather than one you would choose again.
+ * What a rating is worth to a performer's standing. Each step up the scale is an
+ * order of magnitude — a five is worth ten fours, a four ten threes — so no pile
+ * of threes adds up to one good video. A two or a one is a verdict against and
+ * scores nothing, same as never having rated it.
  */
-const STAR_POINTS = [0, 0, 0, 0, 100, 1000];
+const STAR_POINTS = [0, 0, 0, 10, 100, 1000];
 
 /**
  * The twenty performers with the best-rated work, by points — the desktop's
@@ -714,8 +715,8 @@ function topModels(limit = 20) {
 }
 
 /**
- * Every video that earned a performer their score: fives then fours, biggest
- * file first within a rating. Read straight out of the sidecar, so the list
+ * Every video that earned a performer their score: fives, then fours, then
+ * threes, biggest file first within a rating. Read straight out of the sidecar, so the list
  * costs no network — the size and modified time come from the record's own key,
  * which is what lets the still be looked up later.
  */
@@ -724,7 +725,7 @@ function videosForModel(name) {
   const found = [];
   for (const [key, record] of Object.entries(state.library.records || {})) {
     const rating = record.rating || 0;
-    if (rating !== 5 && rating !== 4) continue;
+    if (rating < 3) continue; // a two or a one scored nothing, so it shows nothing
     if (!(record.models || []).some((m) => String(m).toLowerCase() === wanted)) continue;
     const [size, mtime] = key.split(':').map(Number);
     found.push({ key, name: record.name || '', size: size || 0, mtime: mtime || 0, rating });
@@ -800,8 +801,8 @@ function openFavourites() {
 
   const models = topModels(20);
   $('#favHint').textContent = models.length
-    ? 'A five-star video is worth a thousand points, a four-star a hundred, everything else nothing. Tap a name for everything of theirs, or a still to play it.'
-    : 'Nothing to rank yet — rate a few videos four or five stars and name who is in them.';
+    ? 'A five-star video is worth a thousand points, a four-star a hundred, a three-star ten, everything else nothing. Tap a name for everything of theirs, or a still to play it.'
+    : 'Nothing to rank yet — rate a few videos three stars or better and name who is in them.';
 
   for (const [index, entry] of models.entries()) {
     const row = document.createElement('div');
@@ -815,7 +816,7 @@ function openFavourites() {
     line.querySelector('.fav-rank').textContent = String(index + 1);
     line.querySelector('.fav-name').textContent = entry.name;
     line.querySelector('.fav-score').textContent = entry.points.toLocaleString();
-    line.querySelector('.fav-counts').textContent = [5, 4]
+    line.querySelector('.fav-counts').textContent = [5, 4, 3]
       .filter((star) => entry.counts[star])
       .map((star) => entry.counts[star] + '×' + '★'.repeat(star))
       .join('  ');
