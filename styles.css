@@ -306,6 +306,61 @@ main { padding: 0 12px 40px; }
 }
 .chip.add { border-style: dashed; color: var(--text-faint); }
 
+/* The three kinds of label, told apart by colour the way the desktop does it:
+   gold for a performer, green for the studio, plain for a tag. Declared after
+   the plain .chip rule, since at equal specificity the later block wins. */
+.chip.model { border-color: #6b5a2f; background: #2a2416; color: #f0c060; }
+.chip.studio { border-color: #2f6b46; background: #16301f; color: #7fd6a0; }
+
+/* Three-state filter chips: green requires, red excludes, plain is no
+   constraint. The mark leads, so a glance down a row reads as a list of
+   decisions rather than a wall of words. */
+.chip.tri.in {
+  border-color: #2f6b46;
+  background: #16301f;
+  color: #7fd6a0;
+}
+.chip.tri.in::before { content: '+ '; }
+.chip.tri.out {
+  border-color: #6b3535;
+  background: #2c1a1a;
+  color: #e8a0a0;
+}
+.chip.tri.out::before { content: '− '; }
+.chip.tri.none { font-style: italic; }
+
+/* One line under a card: when it was modified, which folder it came out of with
+   the subfolders flattened, and where it is catalogued. */
+.folder-line {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 4px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+.folder-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-link {
+  flex: none;
+  margin-left: auto;
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+/* The per-facet all/any switch is a button now, not a label. */
+.mode {
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev-2);
+  color: var(--text-dim);
+  border-radius: 999px;
+  padding: 1px 8px;
+  margin-left: 6px;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.adv-how { margin: 0; color: var(--text-faint); font-size: 11px; }
+
 /* --------------------------------------------------------------- selection */
 
 .tick {

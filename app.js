@@ -95,16 +95,54 @@ function setBusy(text) {
 
 // ------------------------------------------------------------------ library
 
+const EMPTY_RECORD = { rating: 0, tags: [], models: [], studio: '', url: '' };
+
 function recordFor(video) {
-  return state.library.records[graph.recordKey(video)] || { rating: 0, tags: [] };
+  const record = state.library.records[graph.recordKey(video)];
+  if (!record) return EMPTY_RECORD;
+  return {
+    rating: record.rating || 0,
+    tags: record.tags || [],
+    models: record.models || [],
+    studio: record.studio || '',
+    url: record.url || '',
+  };
+}
+
+/** Case-insensitive dedupe, keeping the spelling that arrived first. */
+function normaliseList(values) {
+  const seen = new Map();
+  for (const raw of values || []) {
+    const value = String(raw).trim().replace(/\s+/g, ' ');
+    if (!value) continue;
+    const key = value.toLowerCase();
+    if (!seen.has(key)) seen.set(key, value);
+  }
+  return [...seen.values()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
 }
 
 function editRecord(video, patch) {
   const key = graph.recordKey(video);
-  const current = state.library.records[key] || { rating: 0, tags: [], name: video.name };
+  const current = state.library.records[key]
+    || { rating: 0, tags: [], models: [], name: video.name };
   const next = { ...current, name: video.name, updated: Date.now(), ...patch };
+
+  // The desktop's shapes, so a record written here reads the same there: lists
+  // deduped and sorted, the studio a single trimmed string, a url only if it is
+  // one the app would be willing to open.
+  for (const field of ['tags', 'models']) {
+    if (Array.isArray(next[field])) next[field] = normaliseList(next[field]);
+  }
+  if (next.studio !== undefined) {
+    next.studio = String(next.studio || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+  }
+  if (next.url !== undefined) {
+    next.url = /^https?:\/\//i.test(String(next.url || '').trim()) ? String(next.url).trim() : '';
+  }
+
   // An empty record is noise in a file that syncs; match the desktop and drop it.
-  if (!next.rating && !(next.tags || []).length) {
+  if (!next.rating && !(next.tags || []).length && !(next.models || []).length
+    && !next.studio && !next.url) {
     delete state.library.records[key];
   } else state.library.records[key] = next;
   state.dirty = true;
@@ -209,7 +247,10 @@ async function loadMore(pages = 1) {
         // Breadth-first: finish the folder in hand, then take the next off the
         // queue. Subfolders join the queue as they are seen, which is why the
         // walk needs no extra request per folder.
-        state.queue.push(...page.folders.map((f) => ({ driveId: f.driveId, itemId: f.id })));
+        for (const video of page.videos) video.folderName = state.walk.name || '';
+        state.queue.push(...page.folders.map((f) => ({
+          driveId: f.driveId, itemId: f.id, name: f.name,
+        })));
         state.walk = page.next
           ? { ...state.walk, next: page.next }
           : (state.queue.shift() || null);
@@ -491,54 +532,67 @@ function updateSelectionBar() {
 }
 
 function tagSelection() {
-  const picked = selectedVideos();
-  if (!picked.length) return;
-  const typed = window.prompt(`Tags to add to ${picked.length} video${picked.length === 1 ? '' : 's'}, comma separated`, '');
-  if (typed === null) return;
-  const adding = typed.split(',').map((t) => t.trim()).filter(Boolean);
-  if (!adding.length) return;
-
-  for (const video of picked) {
-    const existing = recordFor(video).tags || [];
-    // Merge rather than replace: tagging ten videos must not wipe what nine of
-    // them already had. Case-insensitive dedupe, first spelling wins.
-    const seen = new Map();
-    for (const tag of [...existing, ...adding]) {
-      const key = tag.toLowerCase();
-      if (!seen.has(key)) seen.set(key, tag);
-    }
-    editRecord(video, { tags: [...seen.values()].sort((a, b) => a.localeCompare(b)) });
-  }
-  render();
-  toast(`Tagged ${picked.length} video${picked.length === 1 ? '' : 's'}`, 'ok');
+  openLabels(selectedVideos());
 }
 
 // -------------------------------------------------------- advanced filters
 
 /**
- * Empty sets mean "no constraint", so a fresh filter is transparent rather than
+ * Empty maps mean "no constraint", so a fresh filter is transparent rather than
  * matching nothing.
+ *
+ * A facet is a Map of value to 'in' or 'out' rather than a Set, because
+ * "everything by her except the ones tagged solo" is a thing you want to ask
+ * and two Sets per facet is the same thing spelled worse.
  */
 function newAdvFilter() {
   return {
-    text: '', tags: new Set(), tagMode: 'all',
-    ratings: new Set(), folders: new Set(),
+    text: '',
+    tags: new Map(),
+    models: new Map(),
+    studio: new Map(),
+    ratings: new Map(),
+    // Per facet: "all of these tags" and "any of these performers" is a
+    // reasonable pair to ask for. Exclusions are always all-of, since "not
+    // this" means not this either way. The studio has none — one studio per
+    // video makes all-of empty by construction.
+    mode: { tags: 'all', models: 'all' },
+    link: 'all',          // 'all' | 'yes' | 'no'
+    folders: new Set(),   // still a Set: these load videos rather than filter them
   };
 }
+
+/**
+ * The "no tags" / "no models" chip lives in the same map as the values, under a
+ * key no label can have — so it copies, clears and counts for free.
+ */
+const NOTHING = '\u0000';
+
+const FACETS = ['tags', 'models', 'studio', 'ratings'];
 
 let adv = newAdvFilter();
 let advDraft = newAdvFilter();
 
 function advActive(f = adv) {
-  return Boolean(f.text) || f.tags.size || f.ratings.size || f.folders.size;
+  return Boolean(f.text) || f.link !== 'all' || f.folders.size
+    || FACETS.some((name) => f[name].size > 0);
+}
+
+/** The values a facet requires, or excludes. The emptiness chip is not a value. */
+function picked(facet, want) {
+  return [...facet].filter(([value, mode]) => mode === want && value !== NOTHING)
+    .map(([value]) => value);
 }
 
 /** Everything in use for a field across the whole library, not just this folder. */
 function vocabulary(field = 'tags') {
   const counts = new Map();
   for (const record of Object.values(state.library.records || {})) {
-    for (const tag of record[field] || []) {
-      const key = tag.toLowerCase();
+    const values = field === 'studio'
+      ? (record.studio ? [record.studio] : [])
+      : (record[field] || []);
+    for (const tag of values) {
+      const key = String(tag).toLowerCase();
       const hit = counts.get(key);
       if (hit) hit.count += 1;
       else counts.set(key, { tag, count: 1 });
@@ -547,20 +601,55 @@ function vocabulary(field = 'tags') {
   return [...counts.values()].sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
 }
 
+/** The same, alphabetically: a facet is picked by looking a word up. */
+function vocabularyByName(field) {
+  return vocabulary(field).sort((a, b) =>
+    a.tag.localeCompare(b.tag, undefined, { numeric: true, sensitivity: 'base' }));
+}
+
 function matchesAdv(video) {
   if (adv.text) {
     const hay = video.name.toLowerCase();
     if (!adv.text.split(/\s+/).filter(Boolean).every((t) => hay.includes(t))) return false;
   }
-  const record = recordFor(video);
-  if (adv.ratings.size && !adv.ratings.has(record.rating || 0)) return false;
 
-  if (adv.tags.size) {
-    const have = new Set((record.tags || []).map((t) => t.toLowerCase()));
-    const wanted = [...adv.tags].map((t) => t.toLowerCase());
-    const hit = adv.tagMode === 'any' ? wanted.some((t) => have.has(t)) : wanted.every((t) => have.has(t));
-    if (!hit) return false;
+  const record = recordFor(video);
+
+  if (adv.ratings.size) {
+    const rating = record.rating || 0;
+    const wanted = picked(adv.ratings, 'in');
+    const barred = picked(adv.ratings, 'out');
+    if (wanted.length && !wanted.includes(rating)) return false;
+    if (barred.includes(rating)) return false;
   }
+
+  if (adv.link === 'yes' && !record.url) return false;
+  if (adv.link === 'no' && record.url) return false;
+
+  for (const field of ['tags', 'models', 'studio']) {
+    if (!adv[field].size) continue;
+    const held = field === 'studio'
+      ? (record.studio ? [record.studio] : [])
+      : (record[field] || []);
+    const have = new Set(held.map((t) => String(t).toLowerCase()));
+
+    // "Has none at all" is its own question, asked before any value is compared.
+    const nothing = adv[field].get(NOTHING);
+    if (nothing === 'in' && have.size) return false;
+    if (nothing === 'out' && !have.size) return false;
+
+    const wanted = picked(adv[field], 'in').map((t) => t.toLowerCase());
+    const barred = picked(adv[field], 'out').map((t) => t.toLowerCase());
+    const mode = adv.mode[field] || 'all';
+    if (wanted.length) {
+      const hit = mode === 'any'
+        ? wanted.some((t) => have.has(t))
+        : wanted.every((t) => have.has(t));
+      if (!hit) return false;
+    }
+    if (barred.some((t) => have.has(t))) return false;
+  }
+
   // Folder selection is handled by loading those folders' videos, not by
   // filtering — there is nothing to filter until they have been fetched.
   return true;
@@ -569,8 +658,11 @@ function matchesAdv(video) {
 function openAdv() {
   advDraft = {
     ...adv,
-    tags: new Set(adv.tags),
-    ratings: new Set(adv.ratings),
+    tags: new Map(adv.tags),
+    models: new Map(adv.models),
+    studio: new Map(adv.studio),
+    ratings: new Map(adv.ratings),
+    mode: { ...adv.mode },
     folders: new Set(adv.folders),
   };
   $('#advText').value = advDraft.text;
@@ -584,45 +676,100 @@ function renderAdv() {
   for (const value of [0, 1, 2, 3, 4, 5]) {
     ratings.appendChild(advChip(
       value === 0 ? 'unrated' : '★'.repeat(value),
-      advDraft.ratings.has(value),
-      () => { toggleIn(advDraft.ratings, value); renderAdv(); },
+      advDraft.ratings.get(value),
+      () => { cycleIn(advDraft.ratings, value); renderAdv(); },
     ));
   }
 
-  const box = $('#advTags');
-  const vocab = vocabulary();
-  box.innerHTML = vocab.length ? '' : '<span class="dim">No tags yet</span>';
-  for (const entry of vocab) {
-    box.appendChild(advChip(`${entry.tag} · ${entry.count}`, advDraft.tags.has(entry.tag), () => {
-      toggleIn(advDraft.tags, entry.tag);
+  // No studio green or model gold in here: this panel paints green for
+  // "required" and red for "excluded", so an unselected studio chip in its own
+  // colour reads as one that has been chosen. The label colours belong on a
+  // card, where nothing else is coloured.
+  for (const [field, box, none] of [
+    ['studio', '#advStudio', 'no studio'],
+    ['models', '#advModels', 'no models'],
+    ['tags', '#advTags', 'no tags'],
+  ]) {
+    const host = $(box);
+    host.innerHTML = '';
+
+    // First, because "which of these have none" is a question about the whole
+    // listing rather than one more value in it.
+    const gap = advChip(none, advDraft[field].get(NOTHING), () => {
+      cycleIn(advDraft[field], NOTHING);
       renderAdv();
-    }));
+    });
+    gap.classList.add('none');
+    host.appendChild(gap);
+
+    const vocab = vocabularyByName(field);
+    if (!vocab.length) host.insertAdjacentHTML('beforeend', '<span class="dim">nothing yet</span>');
+    for (const entry of vocab) {
+      const chip = advChip(`${entry.tag} · ${entry.count}`, advDraft[field].get(entry.tag), () => {
+        cycleIn(advDraft[field], entry.tag);
+        renderAdv();
+      });
+      host.appendChild(chip);
+    }
   }
-  $('#advTagMode').textContent = advDraft.tagMode;
+
+  const link = $('#advLink');
+  link.innerHTML = '';
+  for (const [value, label] of [['all', 'everything'], ['yes', 'has a link'], ['no', 'no link']]) {
+    const chip = advChip(label, advDraft.link === value ? 'in' : undefined, () => {
+      advDraft.link = value;
+      renderAdv();
+    });
+    link.appendChild(chip);
+  }
+
+  $('#advTagMode').textContent = advDraft.mode.tags;
+  $('#advModelMode').textContent = advDraft.mode.models;
 
   const folders = $('#advFolders');
   folders.innerHTML = '';
   if (!state.folders.length) folders.innerHTML = '<span class="dim">No subfolders here</span>';
   for (const folder of state.folders) {
-    folders.appendChild(advChip(folder.name, advDraft.folders.has(folder.id), () => {
+    folders.appendChild(advChip(folder.name, advDraft.folders.has(folder.id) ? 'in' : undefined, () => {
       toggleIn(advDraft.folders, folder.id);
       renderAdv();
     }));
   }
 
   const bits = [];
+  const say = (field, one, many = one + 's') => {
+    const inn = picked(advDraft[field], 'in').length;
+    const out = picked(advDraft[field], 'out').length;
+    if (inn) bits.push(`${inn} ${inn === 1 ? one : many}`);
+    if (out) bits.push(`without ${out} ${out === 1 ? one : many}`);
+    const nothing = advDraft[field].get(NOTHING);
+    if (nothing === 'in') bits.push(`no ${many} at all`);
+    if (nothing === 'out') bits.push(`some ${many}`);
+  };
   if (advDraft.folders.size) bits.push(`${advDraft.folders.size} folder${advDraft.folders.size === 1 ? '' : 's'}`);
-  if (advDraft.tags.size) bits.push(`${advDraft.tags.size} tag${advDraft.tags.size === 1 ? '' : 's'}`);
-  if (advDraft.ratings.size) bits.push(`${advDraft.ratings.size} rating${advDraft.ratings.size === 1 ? '' : 's'}`);
+  say('studio', 'studio', 'studios');
+  say('models', 'model');
+  say('tags', 'tag');
+  say('ratings', 'rating');
+  if (advDraft.link === 'yes') bits.push('linked');
+  if (advDraft.link === 'no') bits.push('unlinked');
   $('#advSummary').textContent = bits.join(' · ') || 'no filters';
 }
 
-function advChip(label, on, onClick) {
+function advChip(label, mode, onClick) {
   const chip = document.createElement('button');
-  chip.className = 'chip' + (on ? ' on' : '');
+  chip.className = 'chip tri' + (mode === 'in' ? ' in' : mode === 'out' ? ' out' : '');
   chip.textContent = label;
   chip.addEventListener('click', onClick);
   return chip;
+}
+
+/** Off, then required, then excluded, then off again. */
+function cycleIn(facet, value) {
+  const now = facet.get(value);
+  if (!now) facet.set(value, 'in');
+  else if (now === 'in') facet.set(value, 'out');
+  else facet.delete(value);
 }
 
 function toggleIn(set, value) {
@@ -632,15 +779,46 @@ function toggleIn(set, value) {
 
 async function applyAdv() {
   advDraft.text = $('#advText').value.trim().toLowerCase();
-  const picked = [...advDraft.folders];
+  const folders = [...advDraft.folders];
   adv = advDraft;
   $('#adv').hidden = true;
   $('#advDot').hidden = !advActive();
   $('#advBtn').classList.toggle('on', advActive());
 
-  if (picked.length) await loadFoldersInto(picked);
+  if (folders.length) await loadFoldersInto(folders);
   gridKey = '';
   render();
+}
+
+/**
+ * Clears every facet and means it, rather than leaving Apply to be pressed —
+ * which is what the desktop does, and for the same reason: saying "show me
+ * everything" should not take two taps.
+ */
+async function resetAdv() {
+  advDraft = newAdvFilter();
+  $('#advText').value = '';
+  renderAdv();
+  await applyAdv();
+}
+
+/**
+ * Tapping a pill on a card is a filter, not a search: exactly that one value in
+ * its own facet, with everything else cleared. It used to type `#tag` into the
+ * search box, which left the filter panel describing something else.
+ */
+function filterByLabel(field, value) {
+  adv = newAdvFilter();
+  adv[field].set(value, 'in');
+  advDraft = newAdvFilter();
+  $('#search').value = '';
+  state.query = '';
+  $('#advText').value = '';
+  $('#advDot').hidden = !advActive();
+  $('#advBtn').classList.toggle('on', advActive());
+  gridKey = '';
+  render();
+  toast(`${value} — ${filterByName(state.videos).length} here`, 'ok');
 }
 
 /**
@@ -865,25 +1043,39 @@ function buildCard(video) {
   card.appendChild(meta);
 
   card.appendChild(buildRecordRow(video));
+  card.appendChild(buildFolderLine(video));
   return card;
 }
 
-function buildTagChips(video, row) {
+/**
+ * The three kinds of label, in the order the desktop shows them: the studio
+ * first — the one there can only be one of — then the performers, then the
+ * tags. Only tags carry the "+" here; the editor it opens covers all three, so
+ * three buttons would have opened the same sheet.
+ */
+const LABEL_FIELDS = [
+  { field: 'studio', chip: 'chip studio', values: (r) => (r.studio ? [r.studio] : []) },
+  { field: 'models', chip: 'chip model', values: (r) => r.models || [] },
+  { field: 'tags', chip: 'chip', values: (r) => r.tags || [] },
+];
+
+function buildLabelChips(video, row) {
   const record = recordFor(video);
   const chips = document.createElement('span');
   chips.className = 'chips';
 
-  for (const value of record.tags || []) {
-    const chip = document.createElement('button');
-    chip.className = 'chip';
-    chip.textContent = value;
-    chip.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      $('#search').value = '#' + value;
-      state.query = ('#' + value).toLowerCase();
-      render();
-    });
-    chips.appendChild(chip);
+  for (const spec of LABEL_FIELDS) {
+    for (const value of spec.values(record)) {
+      const chip = document.createElement('button');
+      chip.className = spec.chip;
+      chip.textContent = value;
+      chip.title = value;
+      chip.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        filterByLabel(spec.field, value);
+      });
+      chips.appendChild(chip);
+    }
   }
 
   const add = document.createElement('button');
@@ -891,13 +1083,146 @@ function buildTagChips(video, row) {
   add.textContent = (record.tags || []).length ? '+' : '+ tag';
   add.addEventListener('click', (ev) => {
     ev.stopPropagation();
-    const typed = window.prompt('Tags, comma separated', (record.tags || []).join(', '));
-    if (typed === null) return;
-    editRecord(video, { tags: typed.split(',').map((t) => t.trim()).filter(Boolean) });
-    row.replaceWith(buildRecordRow(video));
+    openLabels([video]);
   });
   chips.appendChild(add);
   return chips;
+}
+
+/**
+ * Date, folder, and the source page when the record carries one — the same line
+ * the desktop puts under a card. The folder matters most with the subfolders
+ * flattened, which is the only time a listing mixes them.
+ */
+function buildFolderLine(video) {
+  const record = recordFor(video);
+  const line = document.createElement('div');
+  line.className = 'folder-line';
+
+  const where = document.createElement('span');
+  where.className = 'folder-where';
+  const when = video.mtime ? new Date(video.mtime).toLocaleDateString() : '';
+  where.textContent = [when, video.folderName || ''].filter(Boolean).join('  •  ');
+  line.appendChild(where);
+
+  if (record.url) {
+    const link = document.createElement('a');
+    link.className = 'source-link';
+    link.href = record.url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    let host = 'source';
+    try { host = new URL(record.url).hostname.replace(/^www\./, ''); } catch { /* keep the fallback */ }
+    link.textContent = host + ' \u2197';
+    link.addEventListener('click', (ev) => ev.stopPropagation());
+    line.appendChild(link);
+  }
+
+  return line;
+}
+
+/**
+ * One sheet for every label, over one video or a selection.
+ *
+ * It replaces two window.prompt calls — one for a card, one for the selection
+ * bar — which between them could only edit tags, and could not show you what
+ * vocabulary already existed. Add merges, Replace overwrites, exactly as on the
+ * desktop; the studio is a single value, so Add only sets it when the box has
+ * something in it.
+ */
+let labelTargets = [];
+
+function openLabels(videos) {
+  if (!videos.length) return;
+  labelTargets = videos;
+  const single = videos.length === 1;
+
+  $('#labelsTitle').textContent = single ? videos[0].name : `${videos.length} videos`;
+  $('#labelsHint').textContent = single
+    ? 'Add appends, Replace overwrites.'
+    : `Add appends to each. Replace overwrites all ${videos.length}.`;
+  $('#labelsReplace').textContent = single ? 'Replace' : `Replace on ${videos.length}`;
+
+  // One video's values make Replace a sensible edit; across several there is no
+  // shared starting point unless they already agree.
+  const first = recordFor(videos[0]);
+  $('#labelTags').value = single ? (first.tags || []).join(', ') : '';
+  $('#labelModels').value = single ? (first.models || []).join(', ') : '';
+  const studios = new Set(videos.map((v) => recordFor(v).studio || ''));
+  $('#labelStudio').value = studios.size === 1 ? [...studios][0] : '';
+
+  renderLabelSuggestions();
+  $('#labels').hidden = false;
+}
+
+const LABEL_INPUTS = {
+  studio: { input: '#labelStudio', suggest: '#labelStudioSuggest', chip: 'chip studio', single: true },
+  models: { input: '#labelModels', suggest: '#labelModelsSuggest', chip: 'chip model' },
+  tags: { input: '#labelTags', suggest: '#labelTagsSuggest', chip: 'chip' },
+};
+
+function parseList(text) {
+  return text.split(',').map((t) => t.trim()).filter(Boolean);
+}
+
+/** The vocabulary as taps, which beats typing a name on a phone. */
+function renderLabelSuggestions() {
+  for (const [field, spec] of Object.entries(LABEL_INPUTS)) {
+    const box = $(spec.suggest);
+    box.innerHTML = '';
+    const vocab = vocabularyByName(field);
+    if (!vocab.length) {
+      box.innerHTML = '<span class="dim">nothing yet</span>';
+      continue;
+    }
+    const used = new Set(parseList($(spec.input).value).map((t) => t.toLowerCase()));
+    for (const entry of vocab.slice(0, 60)) {
+      const chip = document.createElement('button');
+      chip.className = spec.chip + (used.has(entry.tag.toLowerCase()) ? ' on' : '');
+      chip.textContent = `${entry.tag} · ${entry.count}`;
+      chip.addEventListener('click', () => {
+        if (spec.single) {
+          // One value: a second tap swaps it, tapping the current one clears it.
+          const now = $(spec.input).value.trim().toLowerCase();
+          $(spec.input).value = now === entry.tag.toLowerCase() ? '' : entry.tag;
+        } else {
+          const current = parseList($(spec.input).value);
+          const at = current.findIndex((t) => t.toLowerCase() === entry.tag.toLowerCase());
+          if (at >= 0) current.splice(at, 1);
+          else current.push(entry.tag);
+          $(spec.input).value = current.join(', ');
+        }
+        renderLabelSuggestions();
+      });
+      box.appendChild(chip);
+    }
+  }
+}
+
+function commitLabels(mode) {
+  const tags = parseList($('#labelTags').value);
+  const models = parseList($('#labelModels').value);
+  const studio = $('#labelStudio').value.trim();
+  const videos = labelTargets;
+  $('#labels').hidden = true;
+
+  for (const video of videos) {
+    const record = recordFor(video);
+    const patch = mode === 'replace'
+      ? { tags, models, studio }
+      : {
+        tags: [...(record.tags || []), ...tags],
+        models: [...(record.models || []), ...models],
+        ...(studio ? { studio } : {}),
+      };
+    editRecord(video, patch);
+  }
+
+  render();
+  const n = videos.length;
+  toast(mode === 'replace'
+    ? `Labels set on ${n} video${n === 1 ? '' : 's'}`
+    : `Added to ${n} video${n === 1 ? '' : 's'}`, 'ok');
 }
 
 function buildRecordRow(video) {
@@ -920,7 +1245,7 @@ function buildRecordRow(video) {
   }
   row.appendChild(stars);
 
-  row.appendChild(buildTagChips(video, row));
+  row.appendChild(buildLabelChips(video, row));
   return row;
 }
 
@@ -1262,14 +1587,20 @@ async function boot() {
   $('#advClose').addEventListener('click', () => { $('#adv').hidden = true; });
   $('#advApply').addEventListener('click', applyAdv);
   $('#advReset').addEventListener('click', () => {
-    advDraft = newAdvFilter();
-    $('#advText').value = '';
-    renderAdv();
+    resetAdv();
   });
-  $('#advTagMode').addEventListener('click', () => {
-    advDraft.tagMode = advDraft.tagMode === 'all' ? 'any' : 'all';
-    renderAdv();
-  });
+  for (const [field, id] of [['tags', '#advTagMode'], ['models', '#advModelMode']]) {
+    $(id).addEventListener('click', () => {
+      advDraft.mode[field] = advDraft.mode[field] === 'all' ? 'any' : 'all';
+      renderAdv();
+    });
+  }
+  $('#labelsClose').addEventListener('click', () => { $('#labels').hidden = true; });
+  $('#labelsAdd').addEventListener('click', () => commitLabels('add'));
+  $('#labelsReplace').addEventListener('click', () => commitLabels('replace'));
+  for (const spec of Object.values(LABEL_INPUTS)) {
+    $(spec.input).addEventListener('input', renderLabelSuggestions);
+  }
   $('#selTag').addEventListener('click', tagSelection);
   $('#selMove').addEventListener('click', openMovePicker);
   $('#pickerClose').addEventListener('click', () => { $('#picker').hidden = true; });
@@ -1315,6 +1646,28 @@ async function boot() {
 
   state.library = await graph.loadLibrary();
   await openFolder(null);
+}
+
+/**
+ * Everything this module holds, reachable from the console when the page is
+ * opened with #debug.
+ *
+ * A module's scope is closed, which means the phone UI could not be driven from
+ * a debugger at all — every change to it has had to be checked by hand on a
+ * device. This costs one branch and makes the thing testable.
+ */
+if (location.hash === '#debug') {
+  window.__ve = {
+    state,
+    get adv() { return adv; },
+    set adv(next) { adv = next; },
+    get advDraft() { return advDraft; },
+    newAdvFilter, matchesAdv, advActive, picked, cycleIn, NOTHING,
+    vocabulary, vocabularyByName, recordFor, editRecord, normaliseList,
+    render, renderAdv, openAdv, applyAdv, resetAdv, filterByLabel,
+    openLabels, commitLabels, renderLabelSuggestions,
+    buildCard, buildRecordRow, buildFolderLine, filterByName, sortVideos,
+  };
 }
 
 if ('serviceWorker' in navigator) {

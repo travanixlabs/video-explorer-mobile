@@ -77,12 +77,22 @@
     <div class="adv-body">
       <input id="advText" type="text" class="search" placeholder="name contains…" autocomplete="off">
 
+      <p class="adv-how">Tap once to require, twice to exclude, three times to clear.</p>
+
       <div class="adv-label">Rating</div>
       <div id="advRating" class="chip-row"></div>
 
+      <div class="adv-label">Studio</div>
+      <div id="advStudio" class="chip-row"></div>
 
-      <div class="adv-label">Tags <span id="advTagMode" class="mode">all</span></div>
+      <div class="adv-label">Models <button id="advModelMode" class="mode">all</button></div>
+      <div id="advModels" class="chip-row"></div>
+
+      <div class="adv-label">Tags <button id="advTagMode" class="mode">all</button></div>
       <div id="advTags" class="chip-row"></div>
+
+      <div class="adv-label">Source link</div>
+      <div id="advLink" class="chip-row"></div>
 
       <div class="adv-label">Folders <span class="dim">including everything inside</span></div>
       <div id="advFolders" class="chip-row"></div>
@@ -91,6 +101,35 @@
     <footer class="picker-foot">
       <span id="advSummary" class="dim"></span>
       <button id="advApply" class="btn primary">Apply</button>
+    </footer>
+  </div>
+</div>
+
+<div id="labels" class="picker" hidden>
+  <div class="picker-card">
+    <header class="picker-head">
+      <span id="labelsTitle">Labels</span>
+      <button id="labelsClose" class="btn ghost">✕</button>
+    </header>
+
+    <div class="adv-body">
+      <div class="adv-label">Studio <span class="dim">one only</span></div>
+      <input id="labelStudio" type="text" class="search" placeholder="the production house" autocomplete="off">
+      <div id="labelStudioSuggest" class="chip-row"></div>
+
+      <div class="adv-label">Models</div>
+      <input id="labelModels" type="text" class="search" placeholder="performer names, comma separated" autocomplete="off">
+      <div id="labelModelsSuggest" class="chip-row"></div>
+
+      <div class="adv-label">Tags</div>
+      <input id="labelTags" type="text" class="search" placeholder="comma separated" autocomplete="off">
+      <div id="labelTagsSuggest" class="chip-row"></div>
+    </div>
+
+    <footer class="picker-foot">
+      <span id="labelsHint" class="dim"></span>
+      <button id="labelsAdd" class="btn">Add</button>
+      <button id="labelsReplace" class="btn primary">Replace</button>
     </footer>
   </div>
 </div>
