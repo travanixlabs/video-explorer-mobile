@@ -208,7 +208,7 @@ async function openFolder(entry, { push = true } = {}) {
   // run side by side rather than one behind the other.
   graph.listFolders(driveId, itemId).then((folders) => {
     if (state.load !== run) return;
-    state.folders = folders;
+    state.folders = atRoot() ? folders.filter(isLibraryFolder) : folders;
     renderFolders();
   }).catch((err) => {
     if (state.load === run) toast(err.message, 'err');
@@ -306,6 +306,25 @@ window.addEventListener('popstate', () => {
   if (state.selecting) { exitSelection(); return; }
   if (state.stack.length) goUp();
 });
+
+/**
+ * The root of the drive is a home page, not a directory listing: it is the one
+ * place where OneDrive's own furniture — Documents, Pictures, an apps folder —
+ * sits beside the video libraries. Only the numbered ones belong here, which is
+ * the same rule the desktop applies through its homeFolders setting.
+ *
+ * Matched by name rather than configured, because the phone has no settings file
+ * to configure it in and the convention is already the one on disk.
+ */
+const LIBRARY_FOLDER = /^folder\s*\d+$/i;
+
+function atRoot() {
+  return state.stack.length === 0;
+}
+
+function isLibraryFolder(folder) {
+  return LIBRARY_FOLDER.test(String(folder.name || '').trim());
+}
 
 // -------------------------------------------------------------------- render
 
@@ -654,18 +673,21 @@ function openSettings() {
 
 // -------------------------------------------------------------- favourites
 
-/** The ratings that recommend someone. Two and one are a verdict against. */
-const GOOD_STARS = [5, 4, 3];
+/**
+ * What a rating is worth to a performer's standing. A five is worth ten fours;
+ * everything else is worth nothing, since this ranks who is worth watching and
+ * a three is a video you sat through rather than one you would choose again.
+ */
+const STAR_POINTS = [0, 0, 0, 0, 100, 1000];
 
 /**
- * A top ten per rating, five down to three, and nobody twice — the desktop's
- * ranking, computed here from the same sidecar.
+ * The twenty performers with the best-rated work, by points — the desktop's
+ * ranking, from the same sidecar.
  *
- * A tier is about one rating and nothing else: it ranks on how many videos of
- * exactly that rating someone has, breaks ties on that count and then
- * alphabetically, and anyone already placed higher is left out below.
+ * Ties go to whoever has more well-rated videos, since ten fours and one five
+ * score alike, and then alphabetically.
  */
-function topModelsByStar(limit = 10) {
+function topModels(limit = 20) {
   const tally = new Map();
   for (const record of Object.values(state.library.records || {})) {
     const rating = Math.max(0, Math.min(5, Math.round(Number(record.rating) || 0)));
@@ -675,44 +697,40 @@ function topModelsByStar(limit = 10) {
       const key = name.toLowerCase();
       let entry = tally.get(key);
       if (!entry) {
-        entry = { name, counts: [0, 0, 0, 0, 0, 0], videos: 0 };
+        entry = { name, counts: [0, 0, 0, 0, 0, 0], videos: 0, points: 0 };
         tally.set(key, entry);
       }
       entry.counts[rating] += 1;
       entry.videos += 1;
+      entry.points += STAR_POINTS[rating];
     }
   }
 
-  const all = [...tally.values()];
-  const taken = new Set();
-  return GOOD_STARS.map((star) => {
-    const models = all
-      .filter((e) => e.counts[star] > 0 && !taken.has(e.name.toLowerCase()))
-      .sort((a, b) => b.counts[star] - a.counts[star] || a.name.localeCompare(b.name))
-      .slice(0, limit);
-    for (const entry of models) taken.add(entry.name.toLowerCase());
-    return { star, models };
-  });
+  const good = (entry) => entry.counts[5] + entry.counts[4];
+  return [...tally.values()]
+    .filter((entry) => entry.points > 0)
+    .sort((a, b) => b.points - a.points || good(b) - good(a) || a.name.localeCompare(b.name))
+    .slice(0, limit);
 }
 
 /**
- * The videos that put someone in a tier: that rating only, biggest file first.
- *
- * Read straight out of the sidecar, so the list needs no network at all — the
- * size and modified time come from the record's own key, which is what lets the
- * still be looked up later.
+ * Every video that earned a performer their score: fives then fours, biggest
+ * file first within a rating. Read straight out of the sidecar, so the list
+ * costs no network — the size and modified time come from the record's own key,
+ * which is what lets the still be looked up later.
  */
-function videosForModel(name, star, count) {
+function videosForModel(name) {
   const wanted = name.toLowerCase();
   const found = [];
   for (const [key, record] of Object.entries(state.library.records || {})) {
-    if ((record.rating || 0) !== star) continue;
+    const rating = record.rating || 0;
+    if (rating !== 5 && rating !== 4) continue;
     if (!(record.models || []).some((m) => String(m).toLowerCase() === wanted)) continue;
     const [size, mtime] = key.split(':').map(Number);
-    found.push({ key, name: record.name || '', size: size || 0, mtime: mtime || 0 });
+    found.push({ key, name: record.name || '', size: size || 0, mtime: mtime || 0, rating });
   }
-  found.sort((a, b) => b.size - a.size || a.name.localeCompare(b.name));
-  return found.slice(0, count);
+  found.sort((a, b) => b.rating - a.rating || b.size - a.size || a.name.localeCompare(b.name));
+  return found;
 }
 
 /**
@@ -728,7 +746,15 @@ const favObserver = new IntersectionObserver((entries) => {
 }, { rootMargin: '200px 0px' });
 
 async function fillStills(rows) {
-  const shots = rows.flatMap((row) => [...row.querySelectorAll('.fav-shot')]);
+  // Only the stills within a screen's width of the visible strip: a row can now
+  // hold thirty of them, and each one costs a search.
+  const shots = rows.flatMap((row) => {
+    const strip = row.querySelector('.fav-shots');
+    if (!strip) return [];
+    const reach = strip.scrollLeft + strip.clientWidth * 2;
+    return [...row.querySelectorAll('.fav-shot')]
+      .filter((shot) => !shot.dataset.id && shot.offsetLeft < reach);
+  });
   const wanted = shots.map((shot) => ({
     name: shot.dataset.name, size: Number(shot.dataset.size), mtime: Number(shot.dataset.mtime),
   })).filter((w) => w.name);
@@ -772,56 +798,94 @@ function openFavourites() {
   list.innerHTML = '';
   $('#fav').hidden = false;
 
-  const tiers = topModelsByStar(10);
-  const anyone = tiers.some((tier) => tier.models.length);
-  $('#favHint').textContent = anyone
-    ? 'A top ten per rating, and nobody twice. Tap a name for everything of theirs, or a still to play it.'
-    : 'Nothing to rank yet — rate a few videos that have a performer on them.';
+  const models = topModels(20);
+  $('#favHint').textContent = models.length
+    ? 'A five-star video is worth a thousand points, a four-star a hundred, everything else nothing. Tap a name for everything of theirs, or a still to play it.'
+    : 'Nothing to rank yet — rate a few videos four or five stars and name who is in them.';
 
-  for (const tier of tiers) {
-    if (!tier.models.length) continue;
+  for (const [index, entry] of models.entries()) {
+    const row = document.createElement('div');
+    row.className = 'fav-row';
 
-    const head = document.createElement('div');
-    head.className = 'fav-head';
-    head.innerHTML = `<span class="fav-head-stars">${'★'.repeat(tier.star)}</span>`
-      + `<span class="dim">top ${tier.models.length}${tier.star < 5 ? ', of whoever is left' : ''}</span>`;
-    list.appendChild(head);
+    const line = document.createElement('div');
+    line.className = 'fav-line';
+    line.innerHTML = '<span class="fav-rank"></span><span class="fav-name"></span>'
+      + '<span class="fav-score"></span><span class="fav-counts dim"></span>'
+      + '<span class="fav-total dim"></span>';
+    line.querySelector('.fav-rank').textContent = String(index + 1);
+    line.querySelector('.fav-name').textContent = entry.name;
+    line.querySelector('.fav-score').textContent = entry.points.toLocaleString();
+    line.querySelector('.fav-counts').textContent = [5, 4]
+      .filter((star) => entry.counts[star])
+      .map((star) => entry.counts[star] + '×' + '★'.repeat(star))
+      .join('  ');
+    line.querySelector('.fav-total').textContent = entry.videos
+      + (entry.videos === 1 ? ' video' : ' videos');
+    line.addEventListener('click', () => showModel(entry.name));
+    row.appendChild(line);
 
-    for (const [index, entry] of tier.models.entries()) {
-      const row = document.createElement('div');
-      row.className = 'fav-row';
-
-      const line = document.createElement('div');
-      line.className = 'fav-line';
-      line.innerHTML = `<span class="fav-rank">${index + 1}</span>`
-        + `<span class="fav-name"></span>`
-        + `<span class="chip fav-count">${entry.counts[tier.star]}×${'★'.repeat(tier.star)}</span>`
-        + `<span class="fav-total dim">${entry.videos} video${entry.videos === 1 ? '' : 's'}</span>`;
-      line.querySelector('.fav-name').textContent = entry.name;
-      line.addEventListener('click', () => showModel(entry.name));
-      row.appendChild(line);
-
-      const strip = document.createElement('div');
-      strip.className = 'fav-shots';
-      for (const video of videosForModel(entry.name, tier.star, 5)) {
-        const shot = document.createElement('div');
-        shot.className = 'fav-shot';
-        shot.dataset.name = video.name;
-        shot.dataset.size = String(video.size);
-        shot.dataset.mtime = String(video.mtime);
-        shot.title = video.name;
-        shot.innerHTML = `<span class="fav-shot-rating">${tier.star}</span>`;
-        shot.addEventListener('click', (ev) => {
-          ev.stopPropagation();
-          playFromStill(shot, entry.name);
-        });
-        strip.appendChild(shot);
-      }
-      row.appendChild(strip);
-      favObserver.observe(row);
-      list.appendChild(row);
-    }
+    row.appendChild(buildStrip(videosForModel(entry.name), entry.name));
+    favObserver.observe(row);
+    list.appendChild(row);
   }
+}
+
+/**
+ * A performer's stills, with arrows when there are more than fit.
+ *
+ * Someone with thirty four-star videos gets thirty stills, so the row scrolls.
+ * A finger can swipe it directly; the arrows are for a mouse, and for saying
+ * that there is more to the right at all.
+ */
+function buildStrip(videos, modelName) {
+  const wrap = document.createElement('div');
+  wrap.className = 'fav-strip';
+
+  const strip = document.createElement('div');
+  strip.className = 'fav-shots';
+  for (const video of videos) {
+    const shot = document.createElement('div');
+    shot.className = 'fav-shot';
+    shot.dataset.name = video.name;
+    shot.dataset.size = String(video.size);
+    shot.dataset.mtime = String(video.mtime);
+    shot.title = video.name;
+    shot.innerHTML = `<span class="fav-shot-rating">${video.rating}</span>`;
+    shot.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      playFromStill(shot, modelName);
+    });
+    strip.appendChild(shot);
+  }
+  wrap.appendChild(strip);
+
+  const arrow = (where, glyph) => {
+    const btn = document.createElement('button');
+    btn.className = `fav-arrow ${where}`;
+    btn.textContent = glyph;
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const step = Math.max(120, strip.clientWidth * 0.8);
+      strip.scrollBy({ left: where === 'next' ? step : -step, behavior: 'smooth' });
+    });
+    wrap.appendChild(btn);
+    return btn;
+  };
+  const back = arrow('prev', '‹');
+  const on = arrow('next', '›');
+
+  // An arrow with nowhere to go invites a press that does nothing, so both stay
+  // hidden until the strip has actually overflowed, and are rechecked as it
+  // moves since either end can run out.
+  const sync = () => {
+    const room = strip.scrollWidth - strip.clientWidth;
+    back.hidden = strip.scrollLeft < 4;
+    on.hidden = room < 4 || strip.scrollLeft > room - 4;
+  };
+  strip.addEventListener('scroll', sync);
+  requestAnimationFrame(sync);
+
+  return wrap;
 }
 
 /**
@@ -2135,7 +2199,8 @@ if (location.hash === '#debug') {
     render, renderAdv, openAdv, applyAdv, resetAdv, filterByLabel,
     openLabels, commitLabels, renderLabelSuggestions,
     buildCard, buildRecordRow, buildFolderLine, filterByName, sortVideos,
-    topModelsByStar, videosForModel, openFavourites, showModel,
+    topModels, videosForModel, openFavourites, showModel, buildStrip,
+    atRoot, isLibraryFolder,
     openPlayer, beginPlayback, startPreview, stopPreview, followListing,
     deleteSelection, openSettings, loadSettings, applyCardWidth,
     get soundOn() { return soundOn; }, setSoundOn, playerList,
