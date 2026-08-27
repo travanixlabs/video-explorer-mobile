@@ -97,7 +97,7 @@ function setBusy(text) {
 
 // ------------------------------------------------------------------ library
 
-const EMPTY_RECORD = { rating: 0, tags: [], models: [], studio: '', url: '' };
+const EMPTY_RECORD = { rating: 0, tags: [], models: [], studio: '', url: '', updated: 0 };
 
 function recordFor(video) {
   const record = state.library.records[graph.recordKey(video)];
@@ -108,6 +108,9 @@ function recordFor(video) {
     models: record.models || [],
     studio: record.studio || '',
     url: record.url || '',
+    // When the labels last changed, which the date sort counts as a change to
+    // the video: tagging one does not touch the file.
+    updated: record.updated || 0,
   };
 }
 
@@ -448,6 +451,15 @@ function firstAlphabetically(values) {
   return best;
 }
 
+/**
+ * When this video was last touched — the file itself, or what is known about it,
+ * whichever came later. Tagging a video does not change the file, so sorting by
+ * date otherwise leaves the work you just did wherever the file happened to sit.
+ */
+function touchedAt(video) {
+  return Math.max(Number(video.mtime) || 0, Number(recordFor(video).updated) || 0);
+}
+
 function sortVideos(list) {
   const dir = state.sortDir === 'asc' ? 1 : -1;
   const key = state.sort;
@@ -456,6 +468,9 @@ function sortVideos(list) {
     let cmp;
     if (key === 'name') {
       cmp = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+    } else if (key === 'mtime') {
+      cmp = touchedAt(a) - touchedAt(b);
+      if (cmp === 0) return a.name.localeCompare(b.name, undefined, { numeric: true });
     } else if (key === 'rating') {
       cmp = (recordFor(a).rating || 0) - (recordFor(b).rating || 0);
       // Returned unflipped: within one rating band names should read A→Z
@@ -1586,8 +1601,15 @@ function buildFolderLine(video) {
 
   const where = document.createElement('span');
   where.className = 'folder-where';
-  const when = video.mtime ? new Date(video.mtime).toLocaleDateString() : '';
+  const touched = touchedAt(video);
+  const when = touched ? new Date(touched).toLocaleDateString() : '';
   where.textContent = [when, video.folderName || ''].filter(Boolean).join('  •  ');
+  // No hover on a phone, so the file's own date goes in the title for a long
+  // press rather than being spelled out on a line this narrow.
+  if (touched > (Number(video.mtime) || 0)) {
+    where.title = `Labelled ${new Date(touched).toLocaleDateString()}`
+      + (video.mtime ? ` · file modified ${new Date(video.mtime).toLocaleDateString()}` : '');
+  }
   line.appendChild(where);
 
   if (record.url) {
@@ -2308,6 +2330,7 @@ if (location.hash === '#debug') {
     openLabels, commitLabels, renderLabelSuggestions,
     buildCard, buildRecordRow, buildFolderLine, filterByName, sortVideos,
     topModels, videosForModel, tagKeep, openFavourites, renderFavTags, showModel, buildStrip,
+    touchedAt, sortVideos,
     atRoot, isLibraryFolder,
     openPlayer, beginPlayback, startPreview, stopPreview, followListing,
     deleteSelection, openSettings, loadSettings, applyCardWidth,
