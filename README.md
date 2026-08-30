@@ -66,7 +66,31 @@ and would share no code with what already exists.
   never applies one by itself — that is yours to do — and the filter's real use
   is *profiled, someone not credited*, which finds a video credited to A that
   also suggests B and C
+- **The face it actually looked at**, beside each suggested name, and a tap on it
+  opens her **lineup** — her other faces, most like the rest of her first, with
+  the ones that disagree marked rather than hidden. They are part of what the
+  match was made against, and dropping them would make a nicer picture of a less
+  honest answer
+- **Ten-frame preview strips**, when the desktop has built one. Seventeen
+  kilobytes holding every frame beats seeking a multi-gigabyte file ten times
+  over mobile data — see below for when that applies
 - Filter by name or `#tag`
+
+### Preview frames, and when they are free
+
+Dragging a thumbnail seeks the real file, which costs mobile data. The desktop
+can instead pre-render ten stills into one small image, and those live in the
+sync root where the phone can now read them: `cache/<size>_<mtime>-s10x640.jpg`,
+with `cache/manifest.json` giving the geometry. When one exists the drag paints
+frames out of it and touches the network once, for 17KB.
+
+That only helps for videos the desktop has actually rendered a strip for, which
+is a **setting on the desktop** — `previewMode`. Set to `live` (the default) it
+seeks the real file on hover exactly as the phone does, and builds no strips at
+all. Set to `sprite` it renders them, which is ten seeks and ten encodes per
+video. So the phone uses a strip where there is one and streams where there is
+not, and switching the desktop to sprite mode is what turns the first case on for
+a library.
 
 ### Where the face suggestions come from
 

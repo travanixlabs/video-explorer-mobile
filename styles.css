@@ -149,6 +149,17 @@ main { padding: 0 12px 40px; }
 .folder-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .folder-count { color: var(--text-faint); font-size: 12px; }
 
+/* The strip preview sits exactly where the video does, so switching between
+   them is a swap rather than a reflow. */
+.player-strip {
+  position: absolute;
+  inset: 0;
+  background-color: #000;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+.player-strip[hidden] { display: none; }
+
 /* ------------------------------------------------------- face suggestions */
 
 .suggests {
@@ -167,6 +178,48 @@ main { padding: 0 12px 40px; }
 /* The bands say how sure it is, and they are the only thing separating a name
    worth acting on from one worth a second look — so they carry the colour, and
    the percentage beside them carries the detail. */
+/* The crop and its name travel together, so a wrapped row never leaves a face
+   on one line and the name it belongs to on the next. */
+.face-pair { display: inline-flex; align-items: center; gap: 5px; }
+
+.face-look {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-elev-2);
+  flex: none;
+}
+.face-look img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.face-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
+  gap: 8px;
+}
+.face-cell { margin: 0; }
+.face-cell img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  display: block;
+  background: var(--bg-elev-2);
+}
+.face-cell figcaption {
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-dim);
+  padding-top: 3px;
+  font-variant-numeric: tabular-nums;
+}
+/* Marked, not hidden: these are part of what the match was made against. */
+.face-cell.odd img { border-color: #8a5a2f; }
+.face-cell.odd figcaption { color: #e0a060; }
+
 .chip.face { border-color: #4a4356; background: #221f2b; color: #cfc6dd; }
 .chip.face.band-strong { border-color: #3f7d59; background: #16301f; color: #9fe0bb; }
 .chip.face.band-likely { border-color: #6b5a2f; background: #2a2416; color: #f0c060; }

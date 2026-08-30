@@ -177,6 +177,19 @@
   </div>
 </div>
 
+<div id="lineup" class="picker" hidden>
+  <div class="picker-card">
+    <header class="picker-head">
+      <span id="lineupTitle">Lineup</span>
+      <button id="lineupClose" class="btn ghost">✕</button>
+    </header>
+    <div class="adv-body">
+      <p id="lineupHint" class="dim"></p>
+      <div id="lineupGrid" class="face-grid"></div>
+    </div>
+  </div>
+</div>
+
 <div id="labels" class="picker" hidden>
   <div class="picker-card">
     <header class="picker-head">
@@ -235,6 +248,9 @@
   </div>
   <div class="player-stage">
     <video id="playerVideo" playsinline preload="metadata"></video>
+    <!-- The ten-frame preview, painted over the video. A background rather than
+         an <img> so one image can show any frame of itself by position. -->
+    <div id="playerStrip" class="player-strip" hidden></div>
     <span id="playerBadge" class="player-badge" hidden></span>
     <button id="playerPlay" class="player-play" title="Play from the start" hidden>▶</button>
     <button id="playerPrev" class="player-nav prev" aria-label="Previous video">‹</button>

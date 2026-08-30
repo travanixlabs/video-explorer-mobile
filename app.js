@@ -15,6 +15,7 @@ const state = {
   library: { version: 1, records: {} },
   libraryLoaded: false, // the sidecar was really read; without this, no writing
   faces: null,        // the desktop's face suggestions, or null when it has never run
+  geom: null,         // the preview cache's geometry, so a strip can be addressed
   dirty: false,       // library edits waiting to be written back
   query: '',
   sort: 'rating',     // matches the desktop default: highest rated first
@@ -171,6 +172,77 @@ function suggestionMatch(video, want) {
   return want === 'match' ? settled : !settled;
 }
 
+/**
+ * The desktop's preview strip for this video: ten frames in one image.
+ *
+ * The desktop decodes these once and they sit in the sync root, so the phone can
+ * have all ten for about 17KB. The alternative — which is what this did before,
+ * and still does when a strip is missing — is seeking the video itself ten times
+ * over mobile data.
+ *
+ * Addressable only because the cache name is `<size>_<mtime>-<salt>`, keyed the same
+ * way the labels are. It used to hash the file's local path, which the phone has
+ * no way of knowing.
+ */
+function stripName(video) {
+  if (!state.geom || !state.geom.sprite) return null;
+  return `cache/${video.size}_${Math.round(video.mtime)}-${state.geom.sprite}.jpg`;
+}
+
+function stripFor(video) {
+  const rel = stripName(video);
+  return rel ? graph.asset(rel) : Promise.resolve(null);
+}
+
+/**
+ * Paints frame `index` of a strip into an element.
+ *
+ * Every tile is letterboxed to the same box by the encoder, so the maths is a
+ * plain multiple of the tile width and a portrait video is never stretched.
+ */
+function showFrame(el, url, index, frames) {
+  el.style.backgroundImage = `url(${url})`;
+  el.style.backgroundSize = `${frames * 100}% 100%`;
+  el.style.backgroundPosition = `${(index / (frames - 1)) * 100}% 0`;
+  el.style.backgroundRepeat = 'no-repeat';
+}
+
+/**
+ * Takes a strip back off, putting the poster underneath back.
+ *
+ * A card's poster is itself a background image on the same element, so painting
+ * a frame replaces it rather than covering it -- which means letting go has to
+ * restore it explicitly, and reset the sizing the strip needed.
+ */
+function clearFrame(el, poster = '') {
+  el.style.backgroundImage = poster ? `url("${poster}")` : '';
+  el.style.backgroundSize = poster ? 'cover' : '';
+  el.style.backgroundPosition = poster ? 'center' : '';
+}
+
+/**
+ * The crop the recognition actually looked at, for a video key and face group.
+ *
+ * Addressable for the same reason the strips are: `<size>_<mtime>-<person>.png`,
+ * keyed the way everything else here is keyed. These are the evidence — a name
+ * and a percentage is a claim, and this is what the claim was made from.
+ */
+function cropName(key, person = 0) {
+  return `faces/thumbs/${String(key).replace(':', '_')}-${person}.png`;
+}
+
+function cropFor(key, person = 0) {
+  return graph.asset(cropName(key, person));
+}
+
+/** Fills an <img> from OneDrive, and removes it if there is nothing there. */
+function paintCrop(img, key, person) {
+  cropFor(key, person).then((url) => {
+    if (url) img.src = url;
+    else img.remove();
+  }).catch(() => img.remove());
+}
+
 /** Case-insensitive dedupe, keeping the spelling that arrived first. */
 function normaliseList(values) {
   const seen = new Map();
@@ -252,6 +324,8 @@ async function readLibrary() {
       state.faces = faces;
       if (state.videos.length) render();
     }).catch(() => {});
+    // And the preview cache's geometry, without which a strip cannot be named.
+    graph.veJson('cache/manifest.json').then((geom) => { state.geom = geom; }).catch(() => {});
     return true;
   } catch (err) {
     state.libraryLoaded = false;
@@ -413,6 +487,9 @@ window.addEventListener('popstate', () => {
   // Unwind one layer at a time, innermost first — the same order Escape uses on
   // the desktop, so back never leaves the app while something is still open.
   pushTrap();
+  // Innermost first: the lineup opens over the player, so back leaves the
+  // player where it was rather than closing both at once.
+  if (!$('#lineup').hidden) { closeLineup(); return; }
   if (!$('#adv').hidden) { $('#adv').hidden = true; return; }
   if (!$('#picker').hidden) { $('#picker').hidden = true; return; }
   if (!$('#player').hidden) { closePlayer(); return; }
@@ -2092,6 +2169,20 @@ function buildSuggestions(video) {
 
   for (const one of suggested) {
     const on = named.has(String(one.name).toLowerCase());
+    const wrap = document.createElement('span');
+    wrap.className = 'face-pair';
+
+    // The crop the match was made from, and a tap on it opens the rest of her.
+    const look = document.createElement('button');
+    look.className = 'face-look';
+    look.title = `Other faces of ${one.name}`;
+    const img = document.createElement('img');
+    img.alt = '';
+    paintCrop(img, graph.recordKey(video), one.person || 0);
+    look.appendChild(img);
+    look.addEventListener('click', (ev) => { ev.stopPropagation(); openLineup(one.name); });
+    wrap.appendChild(look);
+
     const chip = document.createElement('button');
     chip.className = 'chip face' + (on ? ' on' : '') + ` band-${one.band || 'maybe'}`;
     chip.textContent = `${one.name} ${Math.round((one.score || 0) * 100)}% ${on ? '\u2713' : '+'}`;
@@ -2109,9 +2200,77 @@ function buildSuggestions(video) {
         toast(`${one.name} added`, 'ok');
       });
     }
-    row.appendChild(chip);
+    wrap.appendChild(chip);
+    row.appendChild(wrap);
   }
   return row;
+}
+
+/**
+ * Her other faces, so a name can be checked rather than taken on trust.
+ *
+ * The ordering is the desktop's and comes precomputed: every one of her vectors
+ * against every other, most like the rest of her first. That is not something
+ * the phone could work out — the vectors are deliberately not published — so
+ * lineups.json carries the conclusion, and the crops it names come straight out
+ * of the sync root.
+ *
+ * The odd ones stay in the list and are marked rather than hidden. They are part
+ * of what the match was made against, and dropping them would make a nicer
+ * picture of a less honest answer.
+ */
+let lineups = null;
+
+async function openLineup(name) {
+  const box = $('#lineup');
+  $('#lineupTitle').textContent = name;
+  $('#lineupHint').textContent = 'Loading…';
+  $('#lineupGrid').innerHTML = '';
+  box.hidden = false;
+  pushTrap();
+
+  if (!lineups) {
+    try {
+      lineups = await graph.veJson('faces/lineups.json') || { performers: {} };
+    } catch {
+      lineups = { performers: {} };
+    }
+  }
+
+  const found = lineups.performers[name]
+    || lineups.performers[Object.keys(lineups.performers)
+      .find((n) => n.toLowerCase() === name.toLowerCase()) || ''];
+  if (!found) {
+    $('#lineupHint').textContent = `Nothing stored for ${name} yet — `
+      + 'the desktop needs three of her videos read before it can average her.';
+    return;
+  }
+
+  const apart = Number(lineups.apart) || 0.3;
+  $('#lineupHint').textContent = `${found.contributing} of ${found.total} videos build her average`
+    + (found.odd ? ` · ${found.odd} look like someone else` : '');
+
+  const grid = $('#lineupGrid');
+  for (const face of found.faces) {
+    const cell = document.createElement('figure');
+    cell.className = 'face-cell'
+      + (face.agrees !== null && face.agrees < apart ? ' odd' : '');
+
+    const img = document.createElement('img');
+    img.alt = '';
+    paintCrop(img, face.key, 0);
+    cell.appendChild(img);
+
+    const cap = document.createElement('figcaption');
+    cap.textContent = face.agrees === null ? '—' : `${Math.round(face.agrees * 100)}%`;
+    cap.title = face.name || '';
+    cell.appendChild(cap);
+    grid.appendChild(cell);
+  }
+}
+
+function closeLineup() {
+  $('#lineup').hidden = true;
 }
 
 function buildRecordRow(video) {
@@ -2206,6 +2365,20 @@ function attachScrub(shot, video) {
     state.scrub = session;
     hint().textContent = 'loading…';
 
+    // The desktop has usually already decoded ten frames of this and left them
+    // in the sync root. Seventeen kilobytes against streaming the video itself,
+    // so it is worth asking before falling back to the network.
+    const strip = await stripFor(video);
+    if (state.scrub !== session) return;   // the finger left while that was in flight
+    if (strip) {
+      session.strip = strip;
+      session.frames = (state.geom && state.geom.frames) || 10;
+      session.ready = true;
+      hint().textContent = 'drag to scrub';
+      move(session.pendingEvent || ev);
+      return;
+    }
+
     // The first drag has to wait for a Graph round trip and then for the file's
     // metadata. Positions moved through in the meantime are not dropped — the
     // last one is replayed once duration is known, so a drag that starts
@@ -2236,7 +2409,24 @@ function attachScrub(shot, video) {
     ev.preventDefault();
     const box = shot.getBoundingClientRect();
     const fraction = Math.max(0, Math.min(1, (ev.clientX - box.left) / box.width));
-    if (!session.ready) { session.pending = fraction; return; }
+
+    if (session.strip) {
+      // Ten frames means ten steps, and the finger picks one. No seeking, no
+      // decoding, and no bytes beyond the one image already in hand.
+      const at = Math.min(session.frames - 1, Math.floor(fraction * session.frames));
+      showFrame(session.shot, session.strip, at, session.frames);
+      const hintEl = session.shot.querySelector('.scrub-hint');
+      if (hintEl && session.video.duration) {
+        hintEl.textContent = fmtTime((session.video.duration / session.frames) * (at + 1));
+      }
+      return;
+    }
+
+    if (!session.ready) {
+      session.pending = fraction;
+      session.pendingEvent = ev;
+      return;
+    }
     seekTo(session, fraction);
   };
 
@@ -2332,6 +2522,9 @@ function endScrub() {
   current.el.load();
   current.el.remove();
   current.shot.classList.remove('scrubbing');
+  // A strip is painted onto the tile itself, so the poster underneath only
+  // reappears when it is taken off again.
+  if (current.strip) clearFrame(current.shot, thumbCache.get(current.video.id) || '');
   const hint = current.shot.querySelector('.scrub-hint');
   if (hint) hint.textContent = 'drag to scrub';
   state.scrub = null;
@@ -2379,10 +2572,52 @@ function syncSoundButton() {
  * It is the one open stream being seeked, not ten requests — the same ranged
  * URL the element is already reading.
  */
-const preview = { timer: null, index: 0, count: 10 };
+const preview = { timer: null, index: 0, count: 10, wanted: false };
+
+/**
+ * The ten-frame preview, from the strip when there is one.
+ *
+ * Identical to what the seeking version showed -- the desktop cut those frames
+ * at the same even divisions -- for one small image instead of ten seeks into a
+ * file that may be several gigabytes.
+ */
+async function startStripPreview(video) {
+  const strip = await stripFor(video);
+  if (!strip || state.playingId !== video.id) return false;
+  const frames = (state.geom && state.geom.frames) || 10;
+  const el = $('#playerVideo');
+  const shade = $('#playerStrip');
+
+  el.pause();
+  shade.hidden = false;
+  $('#playerPlay').hidden = false;
+  $('#playerBadge').hidden = false;
+
+  const show = (index) => {
+    showFrame(shade, strip, index, frames);
+    const at = video.duration ? (video.duration / frames) * (index + 1) : 0;
+    $('#playerBadge').textContent = `${index + 1}/${frames}${at ? ` · ${fmtTime(at)}` : ''}`;
+  };
+  preview.index = 0;
+  show(0);
+  preview.timer = setInterval(() => { preview.index = (preview.index + 1) % frames; show(preview.index); }, 1000);
+  return true;
+}
 
 function startPreview() {
   stopPreview();
+  // The strip is the cheap answer and usually the available one; seeking the
+  // stream stays as the fallback for a video the desktop has never drawn.
+  const open = playerList().find((v) => v.id === state.playingId);
+  if (open) {
+    startStripPreview(open).then((used) => { if (!used && preview.wanted) seekPreview(); });
+    preview.wanted = true;
+    return;
+  }
+  seekPreview();
+}
+
+function seekPreview() {
   const el = $('#playerVideo');
   el.controls = false;
   el.muted = true;
@@ -2406,6 +2641,9 @@ function startPreview() {
 }
 
 function stopPreview() {
+  preview.wanted = false;
+  const shade = $('#playerStrip');
+  if (shade) { shade.hidden = true; clearFrame(shade); }
   clearInterval(preview.timer);
   preview.timer = null;
 }
@@ -2566,6 +2804,8 @@ async function boot() {
   });
   $('#sortSelect').value = state.sort;
   $('#sortDir').textContent = state.sortDir === 'desc' ? '↓' : '↑';
+  $('#lineupClose').addEventListener('click', closeLineup);
+
   $('#groupBtn').addEventListener('click', () => {
     state.grouped = !state.grouped;
     $('#groupBtn').classList.toggle('on', state.grouped);
@@ -2709,6 +2949,9 @@ if (location.hash === '#debug') {
     topModels, videosForModel, tagKeep, openFavourites, renderFavTags, showModel, buildStrip,
     buildModelGroups, buildGroupHead, favouriteModels, isFavouriteModel, toggleFavouriteModel,
     facesFor, suggestionMatch, buildSuggestions, renderPlayerDetails,
+    cropFor, cropName, paintCrop, openLineup, closeLineup, stripName, showFrame, clearFrame,
+    get lineups() { return lineups; },
+    set lineups(next) { lineups = next; },
     touchedAt, sortVideos,
     atRoot, isLibraryFolder,
     openPlayer, beginPlayback, startPreview, stopPreview, followListing,

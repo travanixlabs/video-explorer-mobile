@@ -312,6 +312,62 @@ export async function saveLibrary(library) {
   loadedCount = count;
 }
 
+const VE_PATH = '/me/drive/root:/.video-explorer';
+
+/**
+ * A file out of the app's own folder, as a URL an <img> or a background can use.
+ *
+ * Graph will not serve these to an <img src> — every request needs a bearer
+ * token — so the bytes are fetched and handed back as an object URL. Absent is
+ * an ordinary answer here, not an error: a preview strip exists only for videos
+ * the desktop has actually drawn, and the caller has a fallback.
+ *
+ * Kept in an LRU, because these are real memory. A hundred and twenty strips at
+ * ~17KB is about 2MB, which is nothing, and past that the oldest is released.
+ */
+const HELD = 120;
+const held = new Map();
+
+export async function asset(rel) {
+  if (held.has(rel)) {
+    const hit = held.get(rel);
+    // Re-inserting moves it to the end, which is what makes this an LRU rather
+    // than a queue that evicts whatever happens to be oldest by arrival.
+    held.delete(rel);
+    held.set(rel, hit);
+    return hit;
+  }
+
+  let url = null;
+  try {
+    const token = await accessToken();
+    const res = await fetch(`${BASE}${VE_PATH}/${rel}:/content`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.ok) url = URL.createObjectURL(await res.blob());
+  } catch { /* offline: the caller falls back to streaming */ }
+
+  held.set(rel, url);
+  if (held.size > HELD) {
+    const oldest = held.keys().next().value;
+    const going = held.get(oldest);
+    if (going) URL.revokeObjectURL(going);
+    held.delete(oldest);
+  }
+  return url;
+}
+
+/** A small JSON file out of the same folder, or null when it is not there. */
+export async function veJson(rel) {
+  const token = await accessToken();
+  const res = await fetch(`${BASE}${VE_PATH}/${rel}:/content`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Could not read ${rel} (${res.status})`);
+  return res.json();
+}
+
 const FACES_PATH = '/me/drive/root:/.video-explorer/faces/suggestions.json';
 
 /**
