@@ -13,6 +13,7 @@ const state = {
   folders: [],
   videos: [],
   library: { version: 1, records: {} },
+  libraryLoaded: false, // the sidecar was really read; without this, no writing
   dirty: false,       // library edits waiting to be written back
   query: '',
   sort: 'rating',     // matches the desktop default: highest rated first
@@ -127,6 +128,16 @@ function normaliseList(values) {
 }
 
 function editRecord(video, patch) {
+  // Nothing may be written on top of labels that were never read. `state.library`
+  // is empty in both cases — loaded-and-empty and never-loaded — and only this
+  // flag tells them apart.
+  if (!state.libraryLoaded) {
+    // Usually a minute of bad signal rather than anything permanent, so the
+    // answer is to try again rather than to send you off to fix something.
+    toast('Labels have not loaded — retrying, give that another tap', 'err');
+    readLibrary();
+    return;
+  }
   const key = graph.recordKey(video);
   const current = state.library.records[key]
     || { rating: 0, tags: [], models: [], name: video.name };
@@ -154,12 +165,39 @@ function editRecord(video, patch) {
   scheduleSave();
 }
 
+/**
+ * Reads the sidecar, and records whether it was really read.
+ *
+ * A failure leaves the app browsable and the labels frozen, which is the right
+ * trade in both directions: you can still watch things, and a bad minute of
+ * signal cannot cost you the ratings. `state.library` stays whatever it was, so
+ * a retry that succeeds mid-session simply picks up.
+ */
+async function readLibrary() {
+  try {
+    state.library = await graph.loadLibrary();
+    state.libraryLoaded = true;
+    graph.noteLoaded(state.library);
+    // A read that only succeeded on the second attempt has cards on screen
+    // already, drawn without their ratings.
+    if (state.videos.length) render();
+    // Day's copy, in the background — never worth waiting on.
+    graph.dailyBackup(state.library).catch(() => {});
+    return true;
+  } catch (err) {
+    state.libraryLoaded = false;
+    toast(`${err.message} — labels are read-only until this works`, 'err');
+    return false;
+  }
+}
+
 let saveTimer = null;
 function scheduleSave() {
   clearTimeout(saveTimer);
   // Batched: rating five videos in a row is one upload, not five, and each
   // upload replaces the whole file so the last write has to be the winner.
   saveTimer = setTimeout(async () => {
+    if (!state.libraryLoaded) return;
     try {
       await graph.saveLibrary(state.library);
       state.dirty = false;
@@ -169,12 +207,15 @@ function scheduleSave() {
   }, 1200);
 }
 
-// A pending edit must not be lost to a backgrounded tab.
+// A pending edit must not be lost to a backgrounded tab — and coming back is
+// the natural moment to retry a read that failed, since a phone that has been
+// in a pocket has usually found signal again by now.
 window.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden' && state.dirty) {
+  if (document.visibilityState === 'hidden' && state.dirty && state.libraryLoaded) {
     clearTimeout(saveTimer);
     graph.saveLibrary(state.library).then(() => { state.dirty = false; }).catch(() => {});
   }
+  if (document.visibilityState === 'visible' && !state.libraryLoaded) readLibrary();
 });
 
 // ---------------------------------------------------------------- navigation
@@ -2306,7 +2347,7 @@ async function boot() {
   }
 
   loadSettings();
-  state.library = await graph.loadLibrary();
+  await readLibrary();
   await openFolder(null);
 }
 
@@ -2326,6 +2367,7 @@ if (location.hash === '#debug') {
     get advDraft() { return advDraft; },
     newAdvFilter, matchesAdv, advActive, picked, cycleIn, NOTHING,
     vocabulary, vocabularyByName, recordFor, editRecord, normaliseList,
+    readLibrary,
     render, renderAdv, openAdv, applyAdv, resetAdv, filterByLabel,
     openLabels, commitLabels, renderLabelSuggestions,
     buildCard, buildRecordRow, buildFolderLine, filterByName, sortVideos,

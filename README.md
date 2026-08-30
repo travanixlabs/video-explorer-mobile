@@ -54,6 +54,25 @@ and would share no code with what already exists.
   desktop app uses, so a rating set on the PC shows up here and vice versa
 - Filter by name or `#tag`
 
+### Not writing over your labels
+
+The phone edits a file it does not own, over a connection that fails constantly,
+so the read is the dangerous part. Reading the sidecar used to swallow every
+error and hand back an empty library — a minute of bad signal, an expired token,
+a 503 from Graph, all indistinguishable from *you have no labels yet*. The next
+tap on a star then wrote that emptiness over six thousand records.
+
+Now only a genuine 404 means an empty library. Everything else fails loudly, the
+labels go **read-only**, and editing says so rather than pretending to work. It
+retries by itself when you come back to the tab, which is usually enough, since
+the phone has generally found signal again by then. Saving an empty library over
+a non-empty one is refused outright as a last line: this app deletes records one
+at a time, so *all of them* is never something you asked for.
+
+It also takes a copy into `.video-explorer/backups/` once a day, but only on days
+the desktop has not already taken one — a single listing to find out, and no
+upload on the days the PC has been on.
+
 Nothing is written to the phone's storage except the app shell itself.
 
 ## Live

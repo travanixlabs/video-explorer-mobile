@@ -264,23 +264,44 @@ const LIBRARY_PATH = '/me/drive/root:/.video-explorer/library.json';
  * The same sidecar the desktop app writes, read straight from OneDrive. Keyed
  * by size + modified time, so the phone and the PC agree on which record
  * belongs to which video without ever comparing paths.
+ *
+ * A failure to read is *not* an empty library, and this used to say it was.
+ * Every path out of here returned `{ records: {} }` — a flaky signal on the
+ * train, an expired token, a 503 from Graph — and the next tap on a star wrote
+ * that back over six thousand records. Only a genuine 404 means there is
+ * nothing there yet. Everything else throws, and the caller declines to write
+ * until a real load succeeds.
  */
 export async function loadLibrary() {
-  try {
-    const token = await accessToken();
-    const res = await fetch(`${BASE}${LIBRARY_PATH}:/content`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (res.status === 404) return { version: 1, records: {} };
-    if (!res.ok) throw new Error(`library ${res.status}`);
-    return await res.json();
-  } catch {
-    // A missing or unreadable sidecar must not stop you browsing.
-    return { version: 1, records: {} };
+  const token = await accessToken();
+  const res = await fetch(`${BASE}${LIBRARY_PATH}:/content`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (res.status === 404) return { version: 1, records: {} };
+  if (!res.ok) throw new Error(`Could not read your labels (${res.status})`);
+  const body = await res.json();
+  if (!body || typeof body !== 'object' || !body.records || typeof body.records !== 'object') {
+    throw new Error('The labels file on OneDrive is not in a shape this understands');
   }
+  return body;
+}
+
+// What the last successful load contained, so a save can tell an edit from a
+// catastrophe.
+let loadedCount = null;
+
+export function noteLoaded(library) {
+  loadedCount = Object.keys((library && library.records) || {}).length;
 }
 
 export async function saveLibrary(library) {
+  const count = Object.keys((library && library.records) || {}).length;
+  // The signature of a wipe: everything, gone, from a device that deletes one
+  // record at a time. Nothing legitimate on this phone produces it, so refusing
+  // costs nothing and the one time it fires it saves the library.
+  if (loadedCount && !count) {
+    throw new Error('Refusing to save an empty library over your labels');
+  }
   const token = await accessToken();
   const res = await fetch(`${BASE}${LIBRARY_PATH}:/content`, {
     method: 'PUT',
@@ -288,6 +309,43 @@ export async function saveLibrary(library) {
     body: JSON.stringify(library, null, 1),
   });
   if (!res.ok) throw new Error(`Could not save ratings (${res.status})`);
+  loadedCount = count;
+}
+
+const BACKUPS_PATH = '/me/drive/root:/.video-explorer/backups';
+
+/**
+ * One copy of the sidecar a day, into the same `backups/` folder the desktop
+ * writes to.
+ *
+ * The desktop takes its own at startup, so on any day the PC has been on there
+ * is nothing to do here — which is the common case, and it costs one small
+ * listing to find out. On the days it has not, the phone is the only thing
+ * touching the library and the only thing that can protect it. Never blocks
+ * anything: a backup that cannot be taken is worth strictly less than being
+ * able to use the app.
+ */
+export async function dailyBackup(library) {
+  const today = new Date().toISOString().slice(0, 10);
+  let names = [];
+  try {
+    const body = await call(`${BACKUPS_PATH}:/children?$select=name&$top=200`);
+    names = (body.value || []).map((child) => child.name);
+  } catch (err) {
+    // No backups folder yet is the one error worth continuing past: the PUT
+    // below creates it.
+    if (err.status !== 404) return false;
+  }
+  if (names.some((name) => name.startsWith(`library-${today}`))) return false;
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const token = await accessToken();
+  const res = await fetch(`${BASE}${BACKUPS_PATH}/library-${stamp}.json:/content`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(library, null, 1),
+  });
+  return res.ok;
 }
 
 /** Must match library.js on the desktop exactly, or records will not line up. */
