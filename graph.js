@@ -312,6 +312,32 @@ export async function saveLibrary(library) {
   loadedCount = count;
 }
 
+const FACES_PATH = '/me/drive/root:/.video-explorer/faces/suggestions.json';
+
+/**
+ * What the desktop's face recognition has worked out, as one small file.
+ *
+ * The profiles behind it are a thousand files of packed vectors, and the
+ * suggestions are not in them anyway — they come from averaging every performer
+ * across the whole library. The phone reads the conclusion instead: a name, a
+ * score and a band per video, keyed the same way the labels are.
+ *
+ * Absent is the normal state on a library where the feature has never run, so a
+ * 404 is null rather than an error. Anything else throws, and the caller decides
+ * whether that is worth a message.
+ */
+export async function loadSuggestions() {
+  const token = await accessToken();
+  const res = await fetch(`${BASE}${FACES_PATH}:/content`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Could not read the face suggestions (${res.status})`);
+  const body = await res.json();
+  if (!body || typeof body !== 'object' || !body.videos) return null;
+  return body;
+}
+
 const BACKUPS_PATH = '/me/drive/root:/.video-explorer/backups';
 
 /**

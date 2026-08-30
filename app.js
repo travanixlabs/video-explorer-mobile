@@ -14,6 +14,7 @@ const state = {
   videos: [],
   library: { version: 1, records: {} },
   libraryLoaded: false, // the sidecar was really read; without this, no writing
+  faces: null,        // the desktop's face suggestions, or null when it has never run
   dirty: false,       // library edits waiting to be written back
   query: '',
   sort: 'rating',     // matches the desktop default: highest rated first
@@ -22,6 +23,8 @@ const state = {
   load: null,         // token identifying the in-flight folder load
   next: null,
   flatten: false,     // every video below here, not just this folder
+  grouped: false,     // the grid split into one section per performer
+  groups: [],         // [{ key, name, files }] while grouped, favourites first
   walk: null,         // { driveId, itemId, next } — where the flattened walk is
   queue: [],          // folders the walk has seen but not visited yet
   playingId: null,    // which video the player has open, for swipe-to-next
@@ -98,7 +101,25 @@ function setBusy(text) {
 
 // ------------------------------------------------------------------ library
 
-const EMPTY_RECORD = { rating: 0, tags: [], models: [], studio: '', url: '', updated: 0 };
+const EMPTY_RECORD = {
+  rating: 0, tags: [], models: [], studio: '', production: '', url: '', updated: 0,
+};
+
+/**
+ * Fields with exactly one value, as against a list of them.
+ *
+ * A video comes from one production house and carries one reference code; it
+ * can have any number of performers. That difference decides how a field is
+ * stored, filtered, sorted and edited, so it is written down once here rather
+ * than special-cased at each of those.
+ */
+const SINGLE_FIELDS = new Set(['studio', 'production']);
+
+/** Whatever a field holds, as a list — one value or many. */
+function valuesOf(record, field) {
+  if (!SINGLE_FIELDS.has(field)) return record[field] || [];
+  return record[field] ? [record[field]] : [];
+}
 
 function recordFor(video) {
   const record = state.library.records[graph.recordKey(video)];
@@ -108,11 +129,46 @@ function recordFor(video) {
     tags: record.tags || [],
     models: record.models || [],
     studio: record.studio || '',
+    // The reference's letter code — the series within the house.
+    production: record.production || '',
     url: record.url || '',
     // When the labels last changed, which the date sort counts as a change to
     // the video: tagging one does not touch the file.
     updated: record.updated || 0,
   };
+}
+
+/**
+ * What the face recognition made of a video: the names it suggests, and whether
+ * it has looked at all.
+ *
+ * "Profiled and matched nobody" and "never profiled" are different answers and
+ * the filter has to tell them apart, so the digest lists a key with an empty
+ * array for the first and omits it entirely for the second.
+ */
+function facesFor(video) {
+  const digest = state.faces;
+  if (!digest) return { profiled: false, suggested: [] };
+  const found = digest.videos[graph.recordKey(video)];
+  if (!found) return { profiled: false, suggested: [] };
+  return { profiled: true, suggested: found };
+}
+
+/**
+ * Whether a video's suggestions are all accounted for by the names on it.
+ *
+ * Not "does it suggest anyone" — a video credited to A that also suggests B and
+ * C is exactly the case worth finding, since B might be the one who should have
+ * been on it. Settled means every suggested name is already credited.
+ */
+function suggestionMatch(video, want) {
+  const { profiled, suggested } = facesFor(video);
+  if (want === 'unprofiled') return !profiled;
+  if (!profiled) return false;
+  const named = new Set((recordFor(video).models || []).map((m) => m.toLowerCase()));
+  const settled = suggested.length > 0
+    && suggested.every((s) => named.has(String(s.name).toLowerCase()));
+  return want === 'match' ? settled : !settled;
 }
 
 /** Case-insensitive dedupe, keeping the spelling that arrived first. */
@@ -152,13 +208,19 @@ function editRecord(video, patch) {
   if (next.studio !== undefined) {
     next.studio = String(next.studio || '').trim().replace(/\s+/g, ' ').slice(0, 80);
   }
+  if (next.production !== undefined) {
+    // Upper-cased like the desktop: the site writes MD, RS, MCY that way, and a
+    // code differing only in case is the same code.
+    next.production = String(next.production || '')
+      .trim().replace(/\s+/g, ' ').slice(0, 24).toUpperCase();
+  }
   if (next.url !== undefined) {
     next.url = /^https?:\/\//i.test(String(next.url || '').trim()) ? String(next.url).trim() : '';
   }
 
   // An empty record is noise in a file that syncs; match the desktop and drop it.
   if (!next.rating && !(next.tags || []).length && !(next.models || []).length
-    && !next.studio && !next.url) {
+    && !next.studio && !next.production && !next.url) {
     delete state.library.records[key];
   } else state.library.records[key] = next;
   state.dirty = true;
@@ -183,6 +245,13 @@ async function readLibrary() {
     if (state.videos.length) render();
     // Day's copy, in the background — never worth waiting on.
     graph.dailyBackup(state.library).catch(() => {});
+    // Same for the face suggestions: a listing renders perfectly well without
+    // them, and they are a nicety rather than something to hold the app on.
+    graph.loadSuggestions().then((faces) => {
+      if (!faces) return;
+      state.faces = faces;
+      if (state.videos.length) render();
+    }).catch(() => {});
     return true;
   } catch (err) {
     state.libraryLoaded = false;
@@ -473,6 +542,9 @@ function filterByName(list) {
 /** Which label a sort key reads, and what it reads out of it. */
 const LABEL_SORTS = {
   studio: (v) => (recordFor(v).studio || '').trim(),
+  // One per video like the studio, so sorting by it gathers a series together
+  // and the numeric name tiebreak orders the shoots inside each one.
+  production: (v) => (recordFor(v).production || '').trim(),
   models: (v) => firstAlphabetically(recordFor(v).models),
   tags: (v) => firstAlphabetically(recordFor(v).tags),
 };
@@ -542,6 +614,111 @@ function sortVideos(list) {
   });
 }
 
+/**
+ * The current listing, split into one section per performer.
+ *
+ * A video with three performers belongs to three sections, so the same card is
+ * built three times — that is the view, not a flaw in it: you are looking at
+ * each video once per person in it. Videos with nobody named collect at the end
+ * rather than being dropped, or switching views would quietly hide part of the
+ * listing.
+ *
+ * Favourites lead, then the Top performers ranking. Ordering by how many videos
+ * each has would move a section every time the filter changed.
+ */
+function buildModelGroups(list) {
+  const groups = new Map();
+  const unnamed = [];
+
+  for (const video of list) {
+    if (video.isFolder) continue;
+    const record = recordFor(video);
+    const names = (record.models || []).map((n) => String(n).trim()).filter(Boolean);
+    if (!names.length) { unnamed.push(video); continue; }
+    const rating = Math.max(0, Math.min(5, Math.round(Number(record.rating) || 0)));
+    for (const name of names) {
+      const key = name.toLowerCase();
+      let group = groups.get(key);
+      if (!group) {
+        group = { key, name, files: [], points: 0, good: 0 };
+        groups.set(key, group);
+      }
+      group.files.push(video);
+      group.points += STAR_POINTS[rating];
+      if (rating >= 4) group.good += 1;
+    }
+  }
+
+  const out = [...groups.values()].sort((a, b) => {
+    const fa = isFavouriteModel(a.name) ? 0 : 1;
+    const fb = isFavouriteModel(b.name) ? 0 : 1;
+    // Marked first — that is what makes this a favourites view rather than a
+    // leaderboard — then the Top performers order among the rest. Ties go to
+    // whoever has more well-rated videos, since ten fours and one five score
+    // alike, and the name settles the rest so the order never wobbles.
+    return fa - fb
+      || b.points - a.points
+      || b.good - a.good
+      || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+  });
+  if (unnamed.length) out.push({ key: '', name: '', files: unnamed, unnamed: true });
+  return out;
+}
+
+/**
+ * One performer's heading: the heart that marks them, their name, what this
+ * listing is worth to them, and how many of it is theirs.
+ *
+ * The heart writes to the library rather than to any video, so it takes effect
+ * everywhere at once — including the order of these very sections, which is why
+ * it re-renders rather than just recolouring itself.
+ */
+function buildGroupHead(group) {
+  const head = document.createElement('div');
+  head.className = 'group-head' + (group.unnamed ? ' unnamed' : '');
+
+  if (!group.unnamed) {
+    const marked = isFavouriteModel(group.name);
+    const heart = document.createElement('button');
+    heart.className = 'group-fav' + (marked ? ' on' : '');
+    heart.textContent = marked ? '\u2665' : '\u2661';
+    heart.setAttribute('aria-label', marked ? `Unmark ${group.name}` : `Mark ${group.name}`);
+    heart.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const on = toggleFavouriteModel(group.name);
+      toast(on ? `${group.name} marked a favourite` : `${group.name} unmarked`, 'ok');
+      gridKey = ''; // favourites lead, so this section has moved
+      render();
+    });
+    head.appendChild(heart);
+  }
+
+  const name = document.createElement('button');
+  name.className = 'group-name';
+  name.textContent = group.unnamed ? 'Nobody named' : group.name;
+  if (!group.unnamed) {
+    // Straight to the flat listing for this one performer, the way a chip on a
+    // card behaves: grouping is for finding someone, not for working through
+    // them.
+    name.addEventListener('click', () => filterByLabel('models', group.name));
+  }
+  head.appendChild(name);
+
+  if (!group.unnamed) {
+    const score = document.createElement('span');
+    score.className = 'group-score';
+    score.textContent = group.points.toLocaleString();
+    head.appendChild(score);
+  }
+
+  const count = document.createElement('span');
+  count.className = 'group-count';
+  count.textContent = `${group.files.length} video${group.files.length === 1 ? '' : 's'}`;
+  head.appendChild(count);
+
+  return head;
+}
+
 // Which folder + filter the grid currently shows, so an extra page can be
 // appended instead of rebuilding thousands of cards and re-fetching their
 // thumbnails on every arrival.
@@ -561,7 +738,8 @@ function renderVideos() {
   // cards is a different folder, filter or sort, or the order changing beneath
   // us, and the tail check below catches that.
   const key = state.stack.map((s) => s.itemId).join('/')
-    + '|' + state.query + '|' + state.sort + state.sortDir + '|' + state.flatten;
+    + '|' + state.query + '|' + state.sort + state.sortDir + '|' + state.flatten
+    + '|' + state.grouped;
   const tailMoved = gridCount > 0 && (list[gridCount - 1] || {}).id !== gridTail;
 
   if (key !== gridKey || tailMoved) {
@@ -570,12 +748,39 @@ function renderVideos() {
     gridKey = key;
     gridCount = 0;
   }
-  for (let i = gridCount; i < list.length; i += 1) wrap.appendChild(buildCard(list[i]));
-  gridCount = list.length;
+
+  if (state.grouped) {
+    // Sections cannot be appended to the way a flat tail can: an arriving page
+    // can belong to any of them, and can invent a new one that sorts to the
+    // top. So grouping rebuilds — which is why it is a view you switch into on
+    // a settled listing rather than the mode the app lives in.
+    if (gridCount !== list.length) {
+      wrap.innerHTML = '';
+      wanted.clear();
+      state.groups = buildModelGroups(list);
+      for (const group of state.groups) {
+        wrap.appendChild(buildGroupHead(group));
+        for (const video of group.files) wrap.appendChild(buildCard(video));
+      }
+      gridCount = list.length;
+    }
+  } else {
+    state.groups = [];
+    for (let i = gridCount; i < list.length; i += 1) wrap.appendChild(buildCard(list[i]));
+    gridCount = list.length;
+  }
   gridTail = gridCount ? list[gridCount - 1].id : '';
 
+  // Grouped, the honest number is cards rather than videos: the same video is
+  // on screen once per performer in it, and "12 of 9" would look like a bug.
+  const cards = state.grouped
+    ? state.groups.reduce((n, g) => n + g.files.length, 0)
+    : list.length;
+  const noun = state.grouped ? 'card' : 'video';
   $('#videoCount').textContent = list.length
-    ? `${list.length} video${list.length === 1 ? '' : 's'}${moreToLoad() ? ' so far' : ''}`
+    ? `${cards} ${noun}${cards === 1 ? '' : 's'}`
+      + (state.grouped ? ` in ${state.groups.length} section${state.groups.length === 1 ? '' : 's'}` : '')
+      + (moreToLoad() ? ' so far' : '')
     : (moreToLoad() ? 'Loading…' : 'No videos here');
 
   const more = $('#loadMore');
@@ -736,6 +941,42 @@ function openSettings() {
  * scores nothing, same as never having rated it.
  */
 const STAR_POINTS = [0, 0, 0, 10, 100, 1000];
+
+/**
+ * Favourite performers, beside the records rather than inside them.
+ *
+ * The same list the desktop keeps, in the same place: a favourite belongs to a
+ * person, not to a file, so marking one from the phone shows up on the PC
+ * without touching a single video's record.
+ */
+function favouriteModels() {
+  return (state.library.favourites || []).slice();
+}
+
+function isFavouriteModel(name) {
+  const key = String(name || '').trim().toLowerCase();
+  return !!key && favouriteModels().some((m) => String(m).toLowerCase() === key);
+}
+
+function toggleFavouriteModel(name) {
+  if (!state.libraryLoaded) {
+    toast('Labels have not loaded — retrying, give that another tap', 'err');
+    readLibrary();
+    return false;
+  }
+  const clean = String(name || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+  if (!clean) return false;
+  const key = clean.toLowerCase();
+  const on = !isFavouriteModel(clean);
+  // Filter then push, so a second marking cannot duplicate a name.
+  const list = favouriteModels().filter((m) => String(m).toLowerCase() !== key);
+  if (on) list.push(clean);
+  list.sort((a, b) => String(a).localeCompare(String(b), undefined, { sensitivity: 'base' }));
+  state.library.favourites = list;
+  state.dirty = true;
+  scheduleSave();
+  return on;
+}
 
 /**
  * Which videos a ranking is allowed to count, by tag — the desktop's
@@ -1092,6 +1333,7 @@ function newAdvFilter() {
     tags: new Map(),
     models: new Map(),
     studio: new Map(),
+    production: new Map(),
     ratings: new Map(),
     // Per facet: "all of these tags" and "any of these performers" is a
     // reasonable pair to ask for. Exclusions are always all-of, since "not
@@ -1099,6 +1341,7 @@ function newAdvFilter() {
     // video makes all-of empty by construction.
     mode: { tags: 'all', models: 'all' },
     link: 'all',          // 'all' | 'yes' | 'no'
+    suggested: 'all',     // 'all' | 'match' | 'nomatch' | 'unprofiled'
     folders: new Set(),   // still a Set: these load videos rather than filter them
   };
 }
@@ -1109,13 +1352,13 @@ function newAdvFilter() {
  */
 const NOTHING = '\u0000';
 
-const FACETS = ['tags', 'models', 'studio', 'ratings'];
+const FACETS = ['tags', 'models', 'studio', 'production', 'ratings'];
 
 let adv = newAdvFilter();
 let advDraft = newAdvFilter();
 
 function advActive(f = adv) {
-  return Boolean(f.text) || f.link !== 'all' || f.folders.size
+  return Boolean(f.text) || f.link !== 'all' || f.suggested !== 'all' || f.folders.size
     || FACETS.some((name) => f[name].size > 0);
 }
 
@@ -1129,10 +1372,7 @@ function picked(facet, want) {
 function vocabulary(field = 'tags') {
   const counts = new Map();
   for (const record of Object.values(state.library.records || {})) {
-    const values = field === 'studio'
-      ? (record.studio ? [record.studio] : [])
-      : (record[field] || []);
-    for (const tag of values) {
+    for (const tag of valuesOf(record, field)) {
       const key = String(tag).toLowerCase();
       const hit = counts.get(key);
       if (hit) hit.count += 1;
@@ -1167,12 +1407,11 @@ function matchesAdv(video) {
   if (adv.link === 'yes' && !record.url) return false;
   if (adv.link === 'no' && record.url) return false;
 
-  for (const field of ['tags', 'models', 'studio']) {
+  if (adv.suggested !== 'all' && !suggestionMatch(video, adv.suggested)) return false;
+
+  for (const field of ['tags', 'models', 'studio', 'production']) {
     if (!adv[field].size) continue;
-    const held = field === 'studio'
-      ? (record.studio ? [record.studio] : [])
-      : (record[field] || []);
-    const have = new Set(held.map((t) => String(t).toLowerCase()));
+    const have = new Set(valuesOf(record, field).map((t) => String(t).toLowerCase()));
 
     // "Has none at all" is its own question, asked before any value is compared.
     const nothing = adv[field].get(NOTHING);
@@ -1202,6 +1441,7 @@ function openAdv() {
     tags: new Map(adv.tags),
     models: new Map(adv.models),
     studio: new Map(adv.studio),
+    production: new Map(adv.production),
     ratings: new Map(adv.ratings),
     mode: { ...adv.mode },
     folders: new Set(adv.folders),
@@ -1228,6 +1468,7 @@ function renderAdv() {
   // card, where nothing else is coloured.
   for (const [field, box, none] of [
     ['studio', '#advStudio', 'no studio'],
+    ['production', '#advProduction', 'no production'],
     ['models', '#advModels', 'no models'],
     ['tags', '#advTags', 'no tags'],
   ]) {
@@ -1264,6 +1505,26 @@ function renderAdv() {
     link.appendChild(chip);
   }
 
+  // Only offered once the desktop has actually profiled something: on a library
+  // where the feature has never run, every answer here would be the same one.
+  const faces = $('#advSuggestedRow');
+  const suggest = $('#advSuggested');
+  faces.hidden = !state.faces;
+  suggest.innerHTML = '';
+  if (state.faces) {
+    for (const [value, label] of [
+      ['all', 'everything'],
+      ['match', 'profiled, all suggestions credited'],
+      ['nomatch', 'profiled, someone not credited'],
+      ['unprofiled', 'not profiled'],
+    ]) {
+      suggest.appendChild(advChip(label, advDraft.suggested === value ? 'in' : undefined, () => {
+        advDraft.suggested = value;
+        renderAdv();
+      }));
+    }
+  }
+
   $('#advTagMode').textContent = advDraft.mode.tags;
   $('#advModelMode').textContent = advDraft.mode.models;
 
@@ -1289,11 +1550,15 @@ function renderAdv() {
   };
   if (advDraft.folders.size) bits.push(`${advDraft.folders.size} folder${advDraft.folders.size === 1 ? '' : 's'}`);
   say('studio', 'studio', 'studios');
+  say('production', 'production', 'productions');
   say('models', 'model');
   say('tags', 'tag');
   say('ratings', 'rating');
   if (advDraft.link === 'yes') bits.push('linked');
   if (advDraft.link === 'no') bits.push('unlinked');
+  if (advDraft.suggested === 'match') bits.push('suggestions credited');
+  if (advDraft.suggested === 'nomatch') bits.push('someone not credited');
+  if (advDraft.suggested === 'unprofiled') bits.push('not profiled');
   $('#advSummary').textContent = bits.join(' · ') || 'no filters';
 }
 
@@ -1595,9 +1860,10 @@ function buildCard(video) {
  * three buttons would have opened the same sheet.
  */
 const LABEL_FIELDS = [
-  { field: 'studio', chip: 'chip studio', values: (r) => (r.studio ? [r.studio] : []) },
-  { field: 'models', chip: 'chip model', values: (r) => r.models || [] },
-  { field: 'tags', chip: 'chip', values: (r) => r.tags || [] },
+  { field: 'studio', chip: 'chip studio' },
+  { field: 'production', chip: 'chip production' },
+  { field: 'models', chip: 'chip model' },
+  { field: 'tags', chip: 'chip' },
 ];
 
 function buildLabelChips(video, row) {
@@ -1606,7 +1872,7 @@ function buildLabelChips(video, row) {
   chips.className = 'chips';
 
   for (const spec of LABEL_FIELDS) {
-    for (const value of spec.values(record)) {
+    for (const value of valuesOf(record, spec.field)) {
       const chip = document.createElement('button');
       chip.className = spec.chip;
       chip.textContent = value;
@@ -1696,8 +1962,11 @@ function openLabels(videos) {
   const first = recordFor(videos[0]);
   $('#labelTags').value = single ? (first.tags || []).join(', ') : '';
   $('#labelModels').value = single ? (first.models || []).join(', ') : '';
-  const studios = new Set(videos.map((v) => recordFor(v).studio || ''));
-  $('#labelStudio').value = studios.size === 1 ? [...studios][0] : '';
+  // A single value only makes a sensible starting point when they all agree.
+  for (const [field, box] of [['studio', '#labelStudio'], ['production', '#labelProduction']]) {
+    const held = new Set(videos.map((v) => recordFor(v)[field] || ''));
+    $(box).value = held.size === 1 ? [...held][0] : '';
+  }
 
   renderLabelSuggestions();
   $('#labels').hidden = false;
@@ -1705,6 +1974,10 @@ function openLabels(videos) {
 
 const LABEL_INPUTS = {
   studio: { input: '#labelStudio', suggest: '#labelStudioSuggest', chip: 'chip studio', single: true },
+  production: {
+    input: '#labelProduction', suggest: '#labelProductionSuggest',
+    chip: 'chip production', single: true,
+  },
   models: { input: '#labelModels', suggest: '#labelModelsSuggest', chip: 'chip model' },
   tags: { input: '#labelTags', suggest: '#labelTagsSuggest', chip: 'chip' },
 };
@@ -1765,17 +2038,21 @@ function commitLabels(mode) {
   const tags = parseList($('#labelTags').value);
   const models = parseList($('#labelModels').value);
   const studio = $('#labelStudio').value.trim();
+  const production = $('#labelProduction').value.trim();
   const videos = labelTargets;
   $('#labels').hidden = true;
 
   for (const video of videos) {
     const record = recordFor(video);
     const patch = mode === 'replace'
-      ? { tags, models, studio }
+      ? { tags, models, studio, production }
       : {
         tags: [...(record.tags || []), ...tags],
         models: [...(record.models || []), ...models],
+        // A single value has nothing to append to, so Add sets it only when
+        // the box has something in it and leaves it alone otherwise.
         ...(studio ? { studio } : {}),
+        ...(production ? { production } : {}),
       };
     editRecord(video, patch);
   }
@@ -1787,6 +2064,54 @@ function commitLabels(mode) {
   toast(mode === 'replace'
     ? `Labels set on ${n} video${n === 1 ? '' : 's'}`
     : `Added to ${n} video${n === 1 ? '' : 's'}`, 'ok');
+}
+
+/**
+ * Who the face recognition thinks is in this video, and a tap to credit her.
+ *
+ * Never applied on its own — the desktop's rule, kept here: a suggestion is an
+ * opinion, and putting a name on a video is yours to do. A name already credited
+ * shows a tick instead of a plus, since seeing the recognition agree with the
+ * label is half of what the feature is for.
+ */
+function buildSuggestions(video) {
+  const { profiled, suggested } = facesFor(video);
+  if (!state.faces || !profiled || !suggested.length) return null;
+
+  const row = document.createElement('div');
+  row.className = 'suggests';
+
+  const named = new Set((recordFor(video).models || []).map((m) => m.toLowerCase()));
+  const fresh = suggested.filter((s) => !named.has(String(s.name).toLowerCase())).length;
+
+  const lead = document.createElement('span');
+  lead.className = 'suggests-lead';
+  lead.textContent = fresh === 0 ? 'All credited'
+    : (named.size ? `Also looks like · ${fresh} not credited` : 'Looks like');
+  row.appendChild(lead);
+
+  for (const one of suggested) {
+    const on = named.has(String(one.name).toLowerCase());
+    const chip = document.createElement('button');
+    chip.className = 'chip face' + (on ? ' on' : '') + ` band-${one.band || 'maybe'}`;
+    chip.textContent = `${one.name} ${Math.round((one.score || 0) * 100)}% ${on ? '\u2713' : '+'}`;
+    chip.disabled = on;
+    if (!on) {
+      chip.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const before = playerList();
+        editRecord(video, { models: [...(recordFor(video).models || []), one.name] });
+        // Redraw for whatever is open now, which an edit that filters the
+        // listing may already have changed.
+        const open = playerList().find((v) => v.id === state.playingId);
+        if (open) renderPlayerDetails(open);
+        if (advActive()) { render(); followListing(before); }
+        toast(`${one.name} added`, 'ok');
+      });
+    }
+    row.appendChild(chip);
+  }
+  return row;
 }
 
 function buildRecordRow(video) {
@@ -2113,6 +2438,8 @@ function renderPlayerDetails(video) {
   meta.textContent = bits.join('  ·  ');
   box.appendChild(meta);
   box.appendChild(buildRecordRow(video));
+  const faces = buildSuggestions(video);
+  if (faces) box.appendChild(faces);
   box.appendChild(buildFolderLine(video));
 }
 
@@ -2239,6 +2566,14 @@ async function boot() {
   });
   $('#sortSelect').value = state.sort;
   $('#sortDir').textContent = state.sortDir === 'desc' ? '↓' : '↑';
+  $('#groupBtn').addEventListener('click', () => {
+    state.grouped = !state.grouped;
+    $('#groupBtn').classList.toggle('on', state.grouped);
+    gridKey = '';
+    render();
+    if (state.grouped && !state.groups.length) toast('Nobody is named in this listing', 'err');
+  });
+
   $('#sortSelect').addEventListener('change', (ev) => {
     state.sort = ev.target.value;
     gridKey = ''; // the order changed, so the grid has to be rebuilt
@@ -2372,6 +2707,8 @@ if (location.hash === '#debug') {
     openLabels, commitLabels, renderLabelSuggestions,
     buildCard, buildRecordRow, buildFolderLine, filterByName, sortVideos,
     topModels, videosForModel, tagKeep, openFavourites, renderFavTags, showModel, buildStrip,
+    buildModelGroups, buildGroupHead, favouriteModels, isFavouriteModel, toggleFavouriteModel,
+    facesFor, suggestionMatch, buildSuggestions, renderPlayerDetails,
     touchedAt, sortVideos,
     atRoot, isLibraryFolder,
     openPlayer, beginPlayback, startPreview, stopPreview, followListing,

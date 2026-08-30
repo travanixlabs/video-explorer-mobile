@@ -149,6 +149,81 @@ main { padding: 0 12px 40px; }
 .folder-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .folder-count { color: var(--text-faint); font-size: 12px; }
 
+/* ------------------------------------------------------- face suggestions */
+
+.suggests {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+.suggests-lead {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-right: 2px;
+}
+
+/* The bands say how sure it is, and they are the only thing separating a name
+   worth acting on from one worth a second look — so they carry the colour, and
+   the percentage beside them carries the detail. */
+.chip.face { border-color: #4a4356; background: #221f2b; color: #cfc6dd; }
+.chip.face.band-strong { border-color: #3f7d59; background: #16301f; color: #9fe0bb; }
+.chip.face.band-likely { border-color: #6b5a2f; background: #2a2416; color: #f0c060; }
+.chip.face.on { opacity: 0.65; }
+.chip.face:disabled { pointer-events: none; }
+
+/* --------------------------------------------------------- grouped sections */
+
+/* A heading spans the grid however many columns it has, so the cards under it
+   read as belonging to it rather than flowing beside it. */
+.group-head {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 2px 2px;
+  border-bottom: 1px solid var(--border);
+}
+.group-head + .card { margin-top: 2px; }
+
+.group-fav {
+  border: 0;
+  background: none;
+  padding: 2px 4px;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--text-faint);
+}
+.group-fav.on { color: #e0698c; }
+
+.group-name {
+  border: 0;
+  background: none;
+  padding: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.group-head.unnamed .group-name { color: var(--text-dim); font-weight: 500; }
+
+/* Pushed right, and the score first: it is what the order is built on. */
+.group-score {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: #f0c060;
+  font-size: 13px;
+}
+.group-count {
+  color: var(--text-dim);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
 /* ------------------------------------------------------------------ videos */
 
 .videos {
@@ -312,6 +387,14 @@ main { padding: 0 12px 40px; }
    the plain .chip rule, since at equal specificity the later block wins. */
 .chip.model { border-color: #6b5a2f; background: #2a2416; color: #f0c060; }
 .chip.studio { border-color: #2f6b46; background: #16301f; color: #7fd6a0; }
+/* Violet, so the production code reads as a sibling of the green studio rather
+   than being taken for one at a glance. Same pairing as the desktop. */
+.chip.production {
+  border-color: #5a4a8c;
+  background: #24203c;
+  color: #c3b6ec;
+  font-variant-numeric: tabular-nums;
+}
 
 /* Three-state filter chips: green requires, red excludes, plain is no
    constraint. The mark leads, so a glance down a row reads as a list of

@@ -52,7 +52,34 @@ and would share no code with what already exists.
 - Tap ▶ to watch, streamed and seekable
 - Ratings and tags, read from and written to the **same `library.json`** the
   desktop app uses, so a rating set on the PC shows up here and vice versa
+- **Studio and production**, the two one-per-video labels, with their own chips,
+  their own sort and their own filter facets — the production code upper-cased
+  the way the desktop stores it, so `md` and `MD` are the same code
+- **♡ groups the listing by performer.** A video with three names appears in
+  three sections, which is the view rather than a flaw in it: you are looking at
+  each video once per person in it. Favourites lead, then the Top performers
+  ranking; the heart in a heading writes to the same favourites list the desktop
+  reads, so marking someone here moves her to the top on both. Videos with
+  nobody named collect at the end rather than being hidden
+- **The desktop's face suggestions**, in the player and as a filter: who the
+  recognition thinks is in a video, how sure it is, and a tap to credit her. It
+  never applies one by itself — that is yours to do — and the filter's real use
+  is *profiled, someone not credited*, which finds a video credited to A that
+  also suggests B and C
 - Filter by name or `#tag`
+
+### Where the face suggestions come from
+
+Not from here. A face profile is a packed vector, the suggestions are not in it,
+and working one out means averaging every performer across the whole library and
+scoring each video against the lot — an ONNX pipeline over decoded frames, which
+a phone cannot run and has no business trying.
+
+The desktop writes its conclusions to `.video-explorer/faces/suggestions.json`,
+about a name, a score and a band per video, keyed the same way the labels are.
+The phone reads that one small file after the library and shows the answer. A
+library where the feature has never run has no file, and everything about it
+stays out of the way rather than showing an empty panel.
 
 ### Not writing over your labels
 
@@ -203,6 +230,13 @@ serve.js                local dev server
   not built yet.
 - Move is the only file operation. Delete and rename are the same kind of Graph
   call, but destructive actions on a phone deserve more care than a tap.
+- Grouping rebuilds the grid rather than appending to it: an arriving page can
+  belong to any section and can invent one that sorts to the top. Six hundred
+  videos in forty sections rebuild in about 15ms, so it is a view you switch
+  into on a settled listing rather than the mode the app lives in.
+- The face lineup — the pictures behind a suggestion — is desktop only. The
+  crops are on OneDrive, but a name and a percentage is enough to act on, and
+  the lineup is for the cases where it is not.
 - Moves have not been exercised against real files — this machine's token is
   `Files.Read` only, so the write path could not be tested from the desktop
   side. Try it on something you do not mind first.
