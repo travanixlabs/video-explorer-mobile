@@ -40,6 +40,16 @@ html, body {
            env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
 
+/* Held where it was while an overlay is over it -- see syncPagePin. The offset
+   is an inline `top`, so the listing does not jump to its top and back. */
+body.pinned {
+  position: fixed;
+  left: 0;
+  right: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
 h1 { font-size: 22px; margin: 0 0 8px; }
 h2 { font-size: 13px; margin: 18px 0 8px; color: var(--text-dim); font-weight: 600; }
 .dim { color: var(--text-faint); font-weight: 400; }
@@ -624,7 +634,15 @@ body.selecting .tick { opacity: 1; }
 
 .picker {
   position: fixed;
-  inset: 0;
+  top: 0;
+  left: 0;
+  right: 0;
+  /* Not inset: 0. A fixed box is measured against the viewport as it stood when
+     it was laid out -- one address bar short -- and stays that size when the bar
+     slides away, leaving the page showing through the strip. dvh is the height
+     on screen right now, re-measured as the bar comes and goes. */
+  height: 100vh;
+  height: 100dvh;
   z-index: 80;
   background: rgba(0, 0, 0, .6);
   display: flex;
@@ -659,7 +677,11 @@ body.selecting .tick { opacity: 1; }
 
 .player {
   position: fixed;
-  inset: 0;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 100vh;
+  height: 100dvh; /* as above: the address bar takes this height with it */
   z-index: 90;
   background: #000;
   display: flex;

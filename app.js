@@ -506,6 +506,62 @@ async function goUp() {
   await openFolder(parent, { push: false });
 }
 
+/* ------------------------------------------------------- the page underneath
+ *
+ * An overlay is fixed to the viewport, and on a phone the viewport changes
+ * height underneath it: scroll, and the browser slides its own address bar
+ * away. The strip that bar was covering becomes real screen, the overlay does
+ * not grow into it, and the listing shows through the gap -- scrollable, in the
+ * bottom tenth of the screen, under an open video.
+ *
+ * Two halves to the fix. The stylesheet sizes the overlays in dvh: the height
+ * that is on screen right now, re-measured as the bar comes and goes. And the
+ * page underneath is pinned while an overlay is open, because a page that
+ * cannot scroll cannot send the address bar away in the first place -- and a
+ * drag over the video was quietly scrolling the listing behind it anyway.
+ *
+ * Pinned rather than `overflow: hidden`, which iOS does not honour on the body.
+ * The offset is handed back on the way out, so the listing is where it was.
+ */
+const OVERLAYS = ['#player', '#adv', '#labels', '#picker', '#lineup'];
+let pinnedAt = null;
+
+// While it is pinned the window sits at zero, so anything that wants to know
+// where the listing actually is has to ask for the mark instead.
+function pageScrollY() {
+  return pinnedAt === null ? window.scrollY : pinnedAt;
+}
+
+function syncPagePin() {
+  const open = OVERLAYS.some((sel) => {
+    const el = $(sel);
+    return el && !el.hidden;
+  });
+  if (open === (pinnedAt !== null)) return; // an overlay over an overlay changes nothing
+  if (open) {
+    pinnedAt = window.scrollY;
+    document.body.style.top = `${-pinnedAt}px`;
+    document.body.classList.add('pinned');
+  } else {
+    const back = pinnedAt;
+    pinnedAt = null;
+    document.body.classList.remove('pinned');
+    document.body.style.top = '';
+    window.scrollTo(0, back);
+  }
+}
+
+// Overlays open and close by their hidden attribute in a dozen places. Watching
+// the attribute is one place instead of a dozen, and cannot be forgotten by the
+// next one added.
+function watchOverlays() {
+  const spy = new MutationObserver(syncPagePin);
+  for (const sel of OVERLAYS) {
+    const el = $(sel);
+    if (el) spy.observe(el, { attributes: true, attributeFilter: ['hidden'] });
+  }
+}
+
 // Android's back button should walk the folder trail, not leave the app.
 window.addEventListener('popstate', () => {
   // Unwind one layer at a time, innermost first — the same order Escape uses on
@@ -2462,7 +2518,7 @@ function renderPlayerDetails(video) {
 async function openPlayer(video) {
   const modal = $('#player');
   const el = $('#playerVideo');
-  if (modal.hidden) playerReturn = window.scrollY; // only the way in sets the mark
+  if (modal.hidden) playerReturn = pageScrollY(); // only the way in sets the mark
   state.playingId = video.id;
   state.playingAnchor = null; // it is in the listing until an edit says otherwise
   syncPlayerNav();
@@ -2569,6 +2625,7 @@ async function boot() {
   $('#playerPrev').addEventListener('click', () => playSibling(-1));
   $('#playerNext').addEventListener('click', () => playSibling(1));
   attachPlayerSwipe();
+  watchOverlays();
   $('#loadMore').addEventListener('click', () => loadMore(state.flatten ? FLAT_PAGES : AUTO_PAGES));
 
   // Flatten is a view you reach for rather than a mode you live in, so it is not
