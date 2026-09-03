@@ -24,7 +24,10 @@ const state = {
   load: null,         // token identifying the in-flight folder load
   next: null,
   flatten: false,     // every video below here, not just this folder
-  grouped: false,     // the grid split into one section per performer
+  // '' | 'models' | 'suggested' -- off, by who is credited, by who the faces
+  // look like. Empty rather than false because everything downstream asks
+  // whether it is grouped far more often than it asks how.
+  grouped: '',
   groups: [],         // [{ key, name, files }] while grouped, favourites first
   walk: null,         // { driveId, itemId, next } — where the flattened walk is
   queue: [],          // folders the walk has seen but not visited yet
@@ -703,14 +706,41 @@ function sortVideos(list) {
  * Favourites lead, then the Top performers ranking. Ordering by how many videos
  * each has would move a section every time the filter changed.
  */
-function buildModelGroups(list) {
+const GROUP_MODES = ['', 'models', 'suggested'];
+
+/**
+ * Which grouping is on, on the button itself.
+ *
+ * Two groupings behind one control, so the state has to be legible without
+ * tapping it: the heart fills for either and turns violet for the suggested
+ * one, which is the colour suggestions use everywhere else here.
+ */
+function syncGroupButton() {
+  const btn = $('#groupBtn');
+  if (!btn) return;
+  btn.classList.toggle('on', Boolean(state.grouped));
+  btn.classList.toggle('by-suggested', state.grouped === 'suggested');
+  btn.title = {
+    '': 'Ungrouped \u2014 tap to group by credited performer',
+    models: 'Grouped by credited performer \u2014 tap to group by suggested performer',
+    suggested: 'Grouped by suggested performer, from the face index '
+      + '\u2014 tap for the plain listing',
+  }[state.grouped];
+}
+
+function buildModelGroups(list, mode = 'models') {
   const groups = new Map();
   const unnamed = [];
+  const guessed = mode === 'suggested';
 
   for (const video of list) {
     if (video.isFolder) continue;
     const record = recordFor(video);
-    const names = (record.models || []).map((n) => String(n).trim()).filter(Boolean);
+    // The credited names, or the ones the recogniser put forward. Same view
+    // over a different question: who is in this, against who might be.
+    const names = (guessed
+      ? facesFor(video).map((s) => s.name)
+      : (record.models || [])).map((n) => String(n).trim()).filter(Boolean);
     if (!names.length) { unnamed.push(video); continue; }
     const rating = Math.max(0, Math.min(5, Math.round(Number(record.rating) || 0)));
     for (const name of names) {
@@ -738,7 +768,17 @@ function buildModelGroups(list) {
       || b.good - a.good
       || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
   });
-  if (unnamed.length) out.push({ key: '', name: '', files: unnamed, unnamed: true });
+  if (unnamed.length) {
+    out.push({
+      key: '',
+      name: '',
+      files: unnamed,
+      unnamed: true,
+      // Not the same absence: one is nobody credited, the other is nobody the
+      // recogniser could name -- which includes every video it has not read.
+      label: guessed ? 'Nobody suggested' : 'Nobody named',
+    });
+  }
   return out;
 }
 
@@ -772,7 +812,7 @@ function buildGroupHead(group) {
 
   const name = document.createElement('button');
   name.className = 'group-name';
-  name.textContent = group.unnamed ? 'Nobody named' : group.name;
+  name.textContent = group.unnamed ? (group.label || 'Nobody named') : group.name;
   if (!group.unnamed) {
     // Straight to the flat listing for this one performer, the way a chip on a
     // card behaves: grouping is for finding someone, not for working through
@@ -834,7 +874,7 @@ function renderVideos() {
     if (gridCount !== list.length) {
       wrap.innerHTML = '';
       wanted.clear();
-      state.groups = buildModelGroups(list);
+      state.groups = buildModelGroups(list, state.grouped);
       for (const group of state.groups) {
         wrap.appendChild(buildGroupHead(group));
         for (const video of group.files) wrap.appendChild(buildCard(video));
@@ -1374,7 +1414,6 @@ async function showModel(name) {
   $('#advBtn').classList.add('on');
   state.sort = 'rating';
   state.sortDir = 'desc';
-  $('#sortSelect').value = 'rating';
   state.flatten = true;
   $('#flatBtn').classList.add('on');
   toast(`Looking for ${name} across everything…`, 'ok');
@@ -2787,7 +2826,6 @@ function closePlayer() {
 
 async function boot() {
   $('#signIn').addEventListener('click', () => auth.signIn().catch((e) => toast(e.message, 'err')));
-  $('#signOut').addEventListener('click', () => { auth.signOut(); location.reload(); });
   $('#playerClose').addEventListener('click', closePlayer);
   $('#playerPrev').addEventListener('click', () => playSibling(-1));
   $('#playerNext').addEventListener('click', () => playSibling(1));
@@ -2802,29 +2840,29 @@ async function boot() {
     const here = state.stack[state.stack.length - 1] || null;
     openFolder(here, { push: false });
   });
-  $('#sortSelect').value = state.sort;
-  $('#sortDir').textContent = state.sortDir === 'desc' ? '↓' : '↑';
   $('#lineupClose').addEventListener('click', closeLineup);
 
   $('#groupBtn').addEventListener('click', () => {
-    state.grouped = !state.grouped;
-    $('#groupBtn').classList.toggle('on', state.grouped);
+    // Off, credited, suggested, off. The plain listing is the way back from
+    // either, so neither grouping is more than one tap from the default.
+    state.grouped = GROUP_MODES[(GROUP_MODES.indexOf(state.grouped) + 1) % GROUP_MODES.length];
+    syncGroupButton();
     gridKey = '';
     render();
-    if (state.grouped && !state.groups.length) toast('Nobody is named in this listing', 'err');
+    if (!state.grouped) return;
+    const named = state.groups.filter((g) => !g.unnamed).length;
+    if (named) {
+      toast(state.grouped === 'suggested'
+        ? `${named} performer${named === 1 ? '' : 's'} the faces look like`
+        : `${named} performer${named === 1 ? '' : 's'}, best rated first`, 'ok');
+    } else {
+      toast(state.grouped === 'suggested'
+        ? 'Nobody is suggested in this listing'
+        : 'Nobody is named in this listing', 'err');
+    }
   });
 
-  $('#sortSelect').addEventListener('change', (ev) => {
-    state.sort = ev.target.value;
-    gridKey = ''; // the order changed, so the grid has to be rebuilt
-    render();
-  });
-  $('#sortDir').addEventListener('click', () => {
-    state.sortDir = state.sortDir === 'desc' ? 'asc' : 'desc';
-    $('#sortDir').textContent = state.sortDir === 'desc' ? '↓' : '↑';
-    gridKey = '';
-    render();
-  });
+  syncGroupButton();
 
   $('#advBtn').addEventListener('click', openAdv);
   $('#advClose').addEventListener('click', () => { $('#adv').hidden = true; });
@@ -2864,7 +2902,10 @@ async function boot() {
     const box = $('#playerInfo');
     box.hidden = !box.hidden;
   });
-  $('#favBtn').addEventListener('click', openFavourites);
+  $('#setTopModels').addEventListener('click', () => {
+    $('#settings').hidden = true;
+    openFavourites();
+  });
   $('#favClose').addEventListener('click', () => { $('#fav').hidden = true; });
 
   // The tag filter re-ranks on every tap: there is nothing to apply, since the
@@ -2913,7 +2954,6 @@ async function boot() {
 
   try {
     state.account = await graph.me();
-    $('#account').textContent = state.account.email || state.account.name;
   } catch (err) {
     toast(err.message, 'err');
     $('#gate').hidden = false;

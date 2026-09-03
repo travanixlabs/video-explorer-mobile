@@ -230,6 +230,11 @@ main { padding: 0 12px 40px; }
 
 /* A heading spans the grid however many columns it has, so the cards under it
    read as belonging to it rather than flowing beside it. */
+/* Grouped by the face index rather than by what is credited: the same view of
+   a different question, so it is the same button in another colour rather than
+   a second control beside it. */
+#groupBtn.on.by-suggested { color: #c3b6ec; border-color: #6b5ea8; }
+
 .group-head {
   grid-column: 1 / -1;
   display: flex;
