@@ -446,8 +446,8 @@ main { padding: 0 12px 40px; }
 .chip.tri.out::before { content: '− '; }
 .chip.tri.none { font-style: italic; }
 
-/* One line under a card: when it was modified, which folder it came out of with
-   the subfolders flattened, and where it is catalogued. */
+/* One line under a card: which folder it came out of, with the subfolders
+   flattened. */
 .folder-line {
   display: flex;
   align-items: baseline;
@@ -457,13 +457,6 @@ main { padding: 0 12px 40px; }
   font-size: 11px;
 }
 .folder-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.source-link {
-  flex: none;
-  margin-left: auto;
-  color: var(--accent);
-  text-decoration: none;
-  white-space: nowrap;
-}
 
 /* The per-facet all/any switch is a button now, not a label. */
 .mode {

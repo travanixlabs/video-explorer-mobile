@@ -1723,7 +1723,7 @@ function buildCard(video) {
   card.appendChild(meta);
 
   card.appendChild(buildRecordRow(video));
-  const line = buildFolderLine(video, { full: false });
+  const line = buildFolderLine(video);
   if (line) card.appendChild(line);
   return card;
 }
@@ -1768,50 +1768,25 @@ function buildLabelChips(video, row) {
 }
 
 /**
- * Folder, and on the player the date and the source page too.
+ * Which folder a card came out of, and nothing else.
  *
- * The grid gets the folder alone. A date and a hostname under every card is a
- * line of small print on each of hundreds of them, and neither is what you are
- * looking at a grid to find out -- the player is where one video is the
- * subject, and both are still there.
- *
- * The folder stays because it earns its place with the subfolders flattened,
- * which is the only time a listing mixes them and the only time "where is this
- * one from" is a live question.
+ * The date and the source hostname used to ride along here. Neither is what you
+ * come to a listing to find out, and on the player the folder is already in the
+ * meta row above -- so the player does not call this at all now, and the line is
+ * a card-only affordance for the one question a flattened listing raises: which
+ * of the mixed-together subfolders is this one from.
  */
-function buildFolderLine(video, { full = true } = {}) {
-  const record = recordFor(video);
-  const touched = touchedAt(video);
-  const when = full && touched ? new Date(touched).toLocaleDateString() : '';
+function buildFolderLine(video) {
   // Nothing to say: no row rather than an empty one holding space open.
-  if (!when && !video.folderName && !(full && record.url)) return null;
+  if (!video.folderName) return null;
 
   const line = document.createElement('div');
   line.className = 'folder-line';
 
   const where = document.createElement('span');
   where.className = 'folder-where';
-  where.textContent = [when, video.folderName || ''].filter(Boolean).join('  •  ');
-  // No hover on a phone, so the file's own date goes in the title for a long
-  // press rather than being spelled out on a line this narrow.
-  if (touched > (Number(video.mtime) || 0)) {
-    where.title = `Labelled ${new Date(touched).toLocaleDateString()}`
-      + (video.mtime ? ` · file modified ${new Date(video.mtime).toLocaleDateString()}` : '');
-  }
+  where.textContent = video.folderName;
   line.appendChild(where);
-
-  if (full && record.url) {
-    const link = document.createElement('a');
-    link.className = 'source-link';
-    link.href = record.url;
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    let host = 'source';
-    try { host = new URL(record.url).hostname.replace(/^www\./, ''); } catch { /* keep the fallback */ }
-    link.textContent = host + ' \u2197';
-    link.addEventListener('click', (ev) => ev.stopPropagation());
-    line.appendChild(link);
-  }
 
   return line;
 }
@@ -2482,8 +2457,6 @@ function renderPlayerDetails(video) {
   box.appendChild(buildRecordRow(video));
   const faces = buildSuggestions(video);
   if (faces) box.appendChild(faces);
-  const detail = buildFolderLine(video);
-  if (detail) box.appendChild(detail);
 }
 
 async function openPlayer(video) {
