@@ -169,10 +169,31 @@ function suggestionMatch(video, want) {
   const { profiled, suggested } = facesFor(video);
   if (want === 'unprofiled') return !profiled;
   if (!profiled) return false;
+  // Read, and it gave the recogniser nothing to work with. The digest lists
+  // these separately because an empty suggestion list cannot say which of the
+  // two it is, and only one of them has work left in it.
+  const faceless = facelessKeys().has(graph.recordKey(video));
+  if (want === 'faceless') return faceless;
   const named = new Set((recordFor(video).models || []).map((m) => m.toLowerCase()));
   const settled = suggested.length > 0
     && suggested.every((s) => named.has(String(s.name).toLowerCase()));
-  return want === 'match' ? settled : !settled;
+  if (want === 'nomatch') return !faceless && !settled;
+  return settled;
+}
+
+// Built once per digest rather than per video: this is asked while filtering
+// thousands of rows, and the published list is an array.
+let facelessAt = null;
+let facelessSet = new Set();
+
+function facelessKeys() {
+  const digest = state.faces;
+  if (!digest) return new Set();
+  if (facelessAt !== digest) {
+    facelessAt = digest;
+    facelessSet = new Set(digest.faceless || []);
+  }
+  return facelessSet;
 }
 
 /**
@@ -739,7 +760,7 @@ function buildModelGroups(list, mode = 'models') {
     // The credited names, or the ones the recogniser put forward. Same view
     // over a different question: who is in this, against who might be.
     const names = (guessed
-      ? facesFor(video).map((s) => s.name)
+      ? facesFor(video).suggested.map((s) => s.name)
       : (record.models || [])).map((n) => String(n).trim()).filter(Boolean);
     if (!names.length) { unnamed.push(video); continue; }
     const rating = Math.max(0, Math.min(5, Math.round(Number(record.rating) || 0)));
@@ -1456,10 +1477,104 @@ function newAdvFilter() {
     // this" means not this either way. The studio has none — one studio per
     // video makes all-of empty by construction.
     mode: { tags: 'all', models: 'all' },
-    link: 'all',          // 'all' | 'yes' | 'no'
-    suggested: 'all',     // 'all' | 'match' | 'nomatch' | 'unprofiled'
+    // One question, several answers, each independently included or excluded --
+    // the same shape as the label facets above, and the same as the desktop.
+    favourite: new Map(),       // yes | no
+    link: new Map(),            // yes | no
+    suggested: new Map(),       // match | nomatch | faceless | unprofiled
+    suggestedCount: new Map(),  // one | many
+    suggestedAct: new Map(),    // accepted | rejected | pending
     folders: new Set(),   // still a Set: these load videos rather than filter them
   };
+}
+
+/**
+ * The one-question facets, each answer a predicate. Mirrors the desktop.
+ *
+ * Predicates rather than "derive this video's one value", because the last row
+ * is not exclusive: a video can hold a name you took and another you have not,
+ * and both are true of it at once.
+ */
+const CHOICES = {
+  favourite: {
+    yes: (v) => (recordFor(v).models || []).some((m) => isFavouriteModel(m)),
+    no: (v) => !(recordFor(v).models || []).some((m) => isFavouriteModel(m)),
+  },
+  link: {
+    yes: (v) => Boolean(recordFor(v).url),
+    no: (v) => !recordFor(v).url,
+  },
+  suggested: {
+    match: (v) => suggestionMatch(v, 'match'),
+    nomatch: (v) => suggestionMatch(v, 'nomatch'),
+    faceless: (v) => suggestionMatch(v, 'faceless'),
+    unprofiled: (v) => suggestionMatch(v, 'unprofiled'),
+  },
+  suggestedCount: {
+    one: (v) => facesFor(v).suggested.length === 1,
+    many: (v) => facesFor(v).suggested.length > 1,
+  },
+  suggestedAct: {
+    accepted: (v) => {
+      const named = new Set((recordFor(v).models || []).map((m) => m.toLowerCase()));
+      return facesFor(v).suggested.some((s) => named.has(String(s.name).toLowerCase()));
+    },
+    rejected: (v) => (recordFor(v).notModels || []).length > 0,
+    // Needs a suggestion to be pending: a video with nothing offered is not
+    // awaiting a decision, it is empty.
+    pending: (v) => {
+      const named = new Set((recordFor(v).models || []).map((m) => m.toLowerCase()));
+      return facesFor(v).suggested.some((s) => !named.has(String(s.name).toLowerCase()));
+    },
+  },
+};
+
+const CHOICE_FACETS = Object.keys(CHOICES);
+
+/** Which row draws which facet, and what each answer is called. */
+const CHOICE_ROWS = [
+  ['#advFav', 'favourite', [
+    ['yes', 'a favourite is in it'],
+    ['no', 'nobody marked'],
+  ]],
+  ['#advSuggested', 'suggested', [
+    ['match', 'profiled, all suggestions credited'],
+    ['nomatch', 'profiled, someone not credited'],
+    ['faceless', 'no usable face'],
+    ['unprofiled', 'not profiled'],
+  ]],
+  ['#advSuggestedCount', 'suggestedCount', [
+    ['one', 'one model suggested'],
+    ['many', 'multiple models suggested'],
+  ]],
+  ['#advSuggestedAct', 'suggestedAct', [
+    ['accepted', 'accepted (incl. already matched)'],
+    ['rejected', 'rejected'],
+    ['pending', 'pending'],
+  ]],
+  ['#advLink', 'link', [
+    ['yes', 'has a link'],
+    ['no', 'no link'],
+  ]],
+];
+
+/**
+ * Included if it matches any included answer, excluded if it matches an
+ * excluded one. Exclusion wins, the way it does for tags.
+ */
+function choiceMatch(map, facet, video) {
+  if (!map || !map.size) return true;
+  const tests = CHOICES[facet];
+  let wanted = false;
+  let hit = false;
+  for (const [value, mode] of map) {
+    const test = tests[value];
+    if (!test) continue;
+    const is = test(video);
+    if (mode === 'out' && is) return false;
+    if (mode === 'in') { wanted = true; if (is) hit = true; }
+  }
+  return !wanted || hit;
 }
 
 /**
@@ -1474,7 +1589,8 @@ let adv = newAdvFilter();
 let advDraft = newAdvFilter();
 
 function advActive(f = adv) {
-  return Boolean(f.text) || f.link !== 'all' || f.suggested !== 'all' || f.folders.size
+  return Boolean(f.text) || f.folders.size
+    || CHOICE_FACETS.some((name) => f[name].size > 0)
     || FACETS.some((name) => f[name].size > 0);
 }
 
@@ -1520,10 +1636,10 @@ function matchesAdv(video) {
     if (barred.includes(rating)) return false;
   }
 
-  if (adv.link === 'yes' && !record.url) return false;
-  if (adv.link === 'no' && record.url) return false;
 
-  if (adv.suggested !== 'all' && !suggestionMatch(video, adv.suggested)) return false;
+  for (const facet of CHOICE_FACETS) {
+    if (!choiceMatch(adv[facet], facet, video)) return false;
+  }
 
   for (const field of ['tags', 'models', 'studio', 'production']) {
     if (!adv[field].size) continue;
@@ -1552,16 +1668,13 @@ function matchesAdv(video) {
 }
 
 function openAdv() {
-  advDraft = {
-    ...adv,
-    tags: new Map(adv.tags),
-    models: new Map(adv.models),
-    studio: new Map(adv.studio),
-    production: new Map(adv.production),
-    ratings: new Map(adv.ratings),
-    mode: { ...adv.mode },
-    folders: new Set(adv.folders),
-  };
+  // Every Map copied, not listed by hand. The draft has to be editable without
+  // touching the filter in force -- closing the sheet has to mean cancel -- and
+  // a list of facets to clone goes stale the moment a new one is added.
+  advDraft = { ...adv, mode: { ...adv.mode }, folders: new Set(adv.folders) };
+  for (const [key, value] of Object.entries(adv)) {
+    if (value instanceof Map) advDraft[key] = new Map(value);
+  }
   $('#advText').value = advDraft.text;
   $('#adv').hidden = false;
   renderAdv();
@@ -1611,31 +1724,20 @@ function renderAdv() {
     }
   }
 
-  const link = $('#advLink');
-  link.innerHTML = '';
-  for (const [value, label] of [['all', 'everything'], ['yes', 'has a link'], ['no', 'no link']]) {
-    const chip = advChip(label, advDraft.link === value ? 'in' : undefined, () => {
-      advDraft.link = value;
-      renderAdv();
-    });
-    link.appendChild(chip);
-  }
-
   // Only offered once the desktop has actually profiled something: on a library
   // where the feature has never run, every answer here would be the same one.
-  const faces = $('#advSuggestedRow');
-  const suggest = $('#advSuggested');
-  faces.hidden = !state.faces;
-  suggest.innerHTML = '';
-  if (state.faces) {
-    for (const [value, label] of [
-      ['all', 'everything'],
-      ['match', 'profiled, all suggestions credited'],
-      ['nomatch', 'profiled, someone not credited'],
-      ['unprofiled', 'not profiled'],
-    ]) {
-      suggest.appendChild(advChip(label, advDraft.suggested === value ? 'in' : undefined, () => {
-        advDraft.suggested = value;
+  $('#advSuggestedRow').hidden = !state.faces;
+
+  // Every one of these cycles include -> exclude -> off, the same as the label
+  // rows above and the same as the desktop. They were one-of-N pickers with an
+  // "everything" chip, which could not say "anything except not profiled".
+  for (const [host, facet, options] of CHOICE_ROWS) {
+    const row = $(host);
+    if (!row) continue;
+    row.innerHTML = '';
+    for (const [value, label] of options) {
+      row.appendChild(advChip(label, advDraft[facet].get(value), () => {
+        cycleIn(advDraft[facet], value);
         renderAdv();
       }));
     }
@@ -1670,11 +1772,15 @@ function renderAdv() {
   say('models', 'model');
   say('tags', 'tag');
   say('ratings', 'rating');
-  if (advDraft.link === 'yes') bits.push('linked');
-  if (advDraft.link === 'no') bits.push('unlinked');
-  if (advDraft.suggested === 'match') bits.push('suggestions credited');
-  if (advDraft.suggested === 'nomatch') bits.push('someone not credited');
-  if (advDraft.suggested === 'unprofiled') bits.push('not profiled');
+  // From the same table the chips are drawn from, so a new answer appears in
+  // the summary without being listed here as well.
+  for (const [, facet, options] of CHOICE_ROWS) {
+    for (const [value, label] of options) {
+      const mode = advDraft[facet].get(value);
+      if (mode === 'in') bits.push(label);
+      if (mode === 'out') bits.push(`not ${label}`);
+    }
+  }
   $('#advSummary').textContent = bits.join(' · ') || 'no filters';
 }
 
