@@ -1050,26 +1050,9 @@ function loadSettings() {
   applyCardWidth();
   graph.setPageSize(state.pageSize);
 }
-
-function saveSettings() {
-  try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
-      cardWidth: state.cardWidth, pageSize: state.pageSize,
-    }));
-  } catch { /* private mode: the setting just does not outlive the tab */ }
-}
-
 function applyCardWidth() {
   document.documentElement.style.setProperty('--card-width', state.cardWidth + 'px');
 }
-
-function openSettings() {
-  $('#setCardWidth').value = String(state.cardWidth);
-  $('#setCardWidthLabel').textContent = state.cardWidth + 'px';
-  $('#setPageSize').value = String(state.pageSize);
-  $('#settings').hidden = false;
-}
-
 // -------------------------------------------------------------- favourites
 
 /**
@@ -1117,342 +1100,11 @@ function toggleFavouriteModel(name) {
 }
 
 /**
- * Which videos a ranking is allowed to count, by tag — the desktop's
- * `library.tagFilter`, over the same sidecar. Null when nothing is asked, so the
- * caller can skip a predicate that always says yes.
- */
-function tagKeep() {
-  const wanted = picked(favTags, 'in').map((t) => t.toLowerCase());
-  const banned = picked(favTags, 'out').map((t) => t.toLowerCase());
-  const none = favTags.get(NOTHING) || '';
-  if (!wanted.length && !banned.length && !none) return null;
-  const any = favTagMode === 'any';
-
-  return (record) => {
-    const have = new Set((record.tags || []).map((t) => String(t).toLowerCase()));
-    if (none === 'in' && have.size) return false;
-    if (none === 'out' && !have.size) return false;
-    if (wanted.length) {
-      const hit = any ? wanted.some((t) => have.has(t)) : wanted.every((t) => have.has(t));
-      if (!hit) return false;
-    }
-    return !banned.some((t) => have.has(t));
-  };
-}
-
-/**
- * The twenty performers with the best-rated work, by points — the desktop's
- * ranking, from the same sidecar.
- *
- * `keep` narrows which videos count at all, which re-ranks rather than
- * highlights: filter to one tag and this becomes the top twenty *for that tag*.
- *
- * Ties go to whoever has more well-rated videos, since ten fours and one five
- * score alike, and then alphabetically.
- */
-function topModels(limit = 20, keep = null) {
-  const tally = new Map();
-  for (const record of Object.values(state.library.records || {})) {
-    if (keep && !keep(record)) continue;
-    const rating = Math.max(0, Math.min(5, Math.round(Number(record.rating) || 0)));
-    for (const raw of record.models || []) {
-      const name = String(raw).trim();
-      if (!name) continue;
-      const key = name.toLowerCase();
-      let entry = tally.get(key);
-      if (!entry) {
-        entry = { name, counts: [0, 0, 0, 0, 0, 0], videos: 0, points: 0 };
-        tally.set(key, entry);
-      }
-      entry.counts[rating] += 1;
-      entry.videos += 1;
-      entry.points += STAR_POINTS[rating];
-    }
-  }
-
-  const good = (entry) => entry.counts[5] + entry.counts[4];
-  return [...tally.values()]
-    .filter((entry) => entry.points > 0)
-    .sort((a, b) => b.points - a.points || good(b) - good(a) || a.name.localeCompare(b.name))
-    .slice(0, limit);
-}
-
-/**
- * Every video that earned a performer their score: fives, then fours, then
- * threes, biggest file first within a rating. Read straight out of the sidecar, so the list
- * costs no network — the size and modified time come from the record's own key,
- * which is what lets the still be looked up later.
- */
-function videosForModel(name, keep = null) {
-  const wanted = name.toLowerCase();
-  const found = [];
-  for (const [key, record] of Object.entries(state.library.records || {})) {
-    // The same test as the ranking, or a row would show work that did not count
-    // towards the score beside it.
-    if (keep && !keep(record)) continue;
-    const rating = record.rating || 0;
-    if (rating < 3) continue; // a two or a one scored nothing, so it shows nothing
-    if (!(record.models || []).some((m) => String(m).toLowerCase() === wanted)) continue;
-    const [size, mtime] = key.split(':').map(Number);
-    found.push({ key, name: record.name || '', size: size || 0, mtime: mtime || 0, rating });
-  }
-  found.sort((a, b) => b.rating - a.rating || b.size - a.size || a.name.localeCompare(b.name));
-  return found;
-}
-
-/**
- * Stills arrive in two hops — search for the item, then batch its thumbnail —
- * so they load as a row scrolls into view rather than all at once. Thirty
- * performers would otherwise be a hundred and fifty searches for a panel
- * showing three rows.
- */
-const favObserver = new IntersectionObserver((entries) => {
-  const rows = entries.filter((e) => e.isIntersecting).map((e) => e.target);
-  for (const row of rows) favObserver.unobserve(row);
-  if (rows.length) fillStills(rows);
-}, { rootMargin: '200px 0px' });
-
-async function fillStills(rows) {
-  // Only the stills within a screen's width of the visible strip: a row can now
-  // hold thirty of them, and each one costs a search.
-  const shots = rows.flatMap((row) => {
-    const strip = row.querySelector('.fav-shots');
-    if (!strip) return [];
-    const reach = strip.scrollLeft + strip.clientWidth * 2;
-    return [...row.querySelectorAll('.fav-shot')]
-      .filter((shot) => !shot.dataset.id && shot.offsetLeft < reach);
-  });
-  const wanted = shots.map((shot) => ({
-    name: shot.dataset.name, size: Number(shot.dataset.size), mtime: Number(shot.dataset.mtime),
-  })).filter((w) => w.name);
-  if (!wanted.length) return;
-
-  let items;
-  try {
-    items = await graph.findVideos(wanted);
-  } catch {
-    return;
-  }
-
-  const byShot = new Map();
-  for (const shot of shots) {
-    const item = items.get(`${shot.dataset.size}:${Math.round(Number(shot.dataset.mtime))}`);
-    if (item) byShot.set(shot, item);
-  }
-  if (!byShot.size) return;
-
-  // The item is kept on the element: tapping the still has to open that video,
-  // and this is the only place its id is known.
-  for (const [shot, item] of byShot) {
-    shot.dataset.id = item.id;
-    shot.dataset.drive = item.driveId;
-    favItems.set(item.id, item);
-  }
-
-  try {
-    const thumbs = await graph.thumbnailsFor([...byShot.values()]);
-    for (const [shot, item] of byShot) {
-      const url = thumbs.get(item.id);
-      if (url) shot.style.backgroundImage = `url("${url}")`;
-    }
-  } catch { /* the tile stays blank */ }
-}
-
-const favItems = new Map();
-
-/**
  * Which videos the ranking counts, by tag. The same Map-of-tag → 'in' | 'out'
  * shape as a facet of the advanced filter, so the chips and cycling are shared,
  * and kept out here so a filter survives closing the panel.
  */
-let favTags = new Map();
-let favTagMode = 'all';
 
-const favFiltered = () => favTags.size > 0;
-
-/**
- * What the filter is doing, in words — a re-ranked list looks exactly like an
- * unfiltered one, so the panel has to say why the order changed.
- */
-function favScope() {
-  if (!favFiltered()) return '';
-  const bits = [];
-  const none = favTags.get(NOTHING);
-  if (none === 'in') bits.push('with no tags at all');
-  if (none === 'out') bits.push('with at least one tag');
-  const wanted = picked(favTags, 'in');
-  if (wanted.length) bits.push(`tagged ${wanted.join(favTagMode === 'any' ? ' or ' : ' and ')}`);
-  const banned = picked(favTags, 'out');
-  if (banned.length) bits.push(`not tagged ${banned.join(' or ')}`);
-  return ` Counting only videos ${bits.join(', ')} — so this is the top twenty for that.`;
-}
-
-/** The tag chips above the ranking. Every tap re-ranks, so there is no Apply. */
-function renderFavTags() {
-  $('#favTagMode').textContent = favTagMode;
-  $('#favClear').hidden = !favFiltered();
-
-  const box = $('#favTags');
-  box.innerHTML = '';
-
-  // First, because "who has untagged work" is a question about the whole
-  // library rather than one more tag in it.
-  const gap = advChip('no tags', favTags.get(NOTHING), () => {
-    cycleIn(favTags, NOTHING);
-    openFavourites();
-  });
-  gap.classList.add('chip-none');
-  box.appendChild(gap);
-
-  const vocab = vocabularyByName('tags');
-  if (!vocab.length) box.insertAdjacentHTML('beforeend', '<span class="dim">No tags yet</span>');
-  for (const entry of vocab) {
-    box.appendChild(advChip(`${entry.tag} · ${entry.count}`, favTags.get(entry.tag), () => {
-      cycleIn(favTags, entry.tag);
-      openFavourites();
-    }));
-  }
-}
-
-function openFavourites() {
-  const list = $('#favList');
-  list.innerHTML = '';
-  $('#fav').hidden = false;
-  renderFavTags();
-
-  const keep = tagKeep();
-  const models = topModels(20, keep);
-  const weights = 'A five-star video is worth a thousand points, a four-star a hundred,'
-    + ' a three-star ten, everything else nothing.';
-  $('#favHint').textContent = models.length
-    ? `${weights}${favScope()} Tap a name for everything of theirs, or a still to play it.`
-    : favFiltered()
-      ? 'Nobody has a rated video matching those tags.'
-      : 'Nothing to rank yet — rate a few videos three stars or better and name who is in them.';
-
-  for (const [index, entry] of models.entries()) {
-    const row = document.createElement('div');
-    row.className = 'fav-row';
-
-    const line = document.createElement('div');
-    line.className = 'fav-line';
-    line.innerHTML = '<span class="fav-rank"></span><span class="fav-name"></span>'
-      + '<span class="fav-score"></span><span class="fav-counts dim"></span>'
-      + '<span class="fav-total dim"></span>';
-    line.querySelector('.fav-rank').textContent = String(index + 1);
-    line.querySelector('.fav-name').textContent = entry.name;
-    line.querySelector('.fav-score').textContent = entry.points.toLocaleString();
-    line.querySelector('.fav-counts').textContent = [5, 4, 3]
-      .filter((star) => entry.counts[star])
-      .map((star) => entry.counts[star] + '×' + '★'.repeat(star))
-      .join('  ');
-    line.querySelector('.fav-total').textContent = entry.videos
-      + (entry.videos === 1 ? ' video' : ' videos');
-    line.addEventListener('click', () => showModel(entry.name));
-    row.appendChild(line);
-
-    row.appendChild(buildStrip(videosForModel(entry.name, keep), entry.name));
-    favObserver.observe(row);
-    list.appendChild(row);
-  }
-}
-
-/**
- * A performer's stills, with arrows when there are more than fit.
- *
- * Someone with thirty four-star videos gets thirty stills, so the row scrolls.
- * A finger can swipe it directly; the arrows are for a mouse, and for saying
- * that there is more to the right at all.
- */
-function buildStrip(videos, modelName) {
-  const wrap = document.createElement('div');
-  wrap.className = 'fav-strip';
-
-  const strip = document.createElement('div');
-  strip.className = 'fav-shots';
-  for (const video of videos) {
-    const shot = document.createElement('div');
-    shot.className = 'fav-shot';
-    shot.dataset.name = video.name;
-    shot.dataset.size = String(video.size);
-    shot.dataset.mtime = String(video.mtime);
-    shot.title = video.name;
-    shot.innerHTML = `<span class="fav-shot-rating">${video.rating}</span>`;
-    shot.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      playFromStill(shot, modelName);
-    });
-    strip.appendChild(shot);
-  }
-  wrap.appendChild(strip);
-
-  const arrow = (where, glyph) => {
-    const btn = document.createElement('button');
-    btn.className = `fav-arrow ${where}`;
-    btn.textContent = glyph;
-    btn.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      const step = Math.max(120, strip.clientWidth * 0.8);
-      strip.scrollBy({ left: where === 'next' ? step : -step, behavior: 'smooth' });
-    });
-    wrap.appendChild(btn);
-    return btn;
-  };
-  const back = arrow('prev', '‹');
-  const on = arrow('next', '›');
-
-  // An arrow with nowhere to go invites a press that does nothing, so both stay
-  // hidden until the strip has actually overflowed, and are rechecked as it
-  // moves since either end can run out.
-  const sync = () => {
-    const room = strip.scrollWidth - strip.clientWidth;
-    back.hidden = strip.scrollLeft < 4;
-    on.hidden = room < 4 || strip.scrollLeft > room - 4;
-  };
-  strip.addEventListener('scroll', sync);
-  requestAnimationFrame(sync);
-
-  return wrap;
-}
-
-/**
- * Everything by one performer: the drive root with the subfolders flattened,
- * because their videos are spread across studio folders and the answer is never
- * inside the folder you happen to be standing in.
- */
-async function showModel(name) {
-  $('#fav').hidden = true;
-  adv = newAdvFilter();
-  adv.models.set(name, 'in');
-  // Carried over: arriving from "the top twenty for this tag" and landing on
-  // everything they have ever done would contradict the ranking that sent you.
-  adv.tags = new Map(favTags);
-  adv.mode.tags = favTagMode;
-  advDraft = newAdvFilter();
-  $('#search').value = '';
-  state.query = '';
-  $('#advDot').hidden = false;
-  $('#advBtn').classList.add('on');
-  state.sort = 'rating';
-  state.sortDir = 'desc';
-  state.flatten = true;
-  $('#flatBtn').classList.add('on');
-  toast(`Looking for ${name} across everything…`, 'ok');
-  await openFolder(null);
-}
-
-/** A still is a video, so tapping one plays it. */
-async function playFromStill(shot, name) {
-  const item = shot.dataset.id ? favItems.get(shot.dataset.id) : null;
-  if (!item) {
-    toast('Still finding that one — try again in a moment', 'err');
-    return;
-  }
-  $('#fav').hidden = true;
-  // The player walks whatever is listed, so put their videos behind it first.
-  if (!state.videos.some((v) => v.id === item.id)) state.videos.unshift(item);
-  await openPlayer(item);
-}
 
 // -------------------------------------------------------- advanced filters
 
@@ -2989,41 +2641,11 @@ async function boot() {
     $(spec.input).addEventListener('input', renderLabelSuggestions);
   }
   $('#selDelete').addEventListener('click', deleteSelection);
-  $('#setBtn').addEventListener('click', openSettings);
-  $('#settingsClose').addEventListener('click', () => { $('#settings').hidden = true; });
-  $('#setCardWidth').addEventListener('input', (ev) => {
-    state.cardWidth = Number(ev.target.value) || 460;
-    $('#setCardWidthLabel').textContent = state.cardWidth + 'px';
-    applyCardWidth();
-    saveSettings();
-  });
-  $('#setPageSize').addEventListener('change', (ev) => {
-    state.pageSize = Number(ev.target.value) || 200;
-    graph.setPageSize(state.pageSize);
-    saveSettings();
-  });
   $('#playerPlay').addEventListener('click', beginPlayback);
   $('#playerSound').addEventListener('click', () => setSoundOn(!soundOn));
   $('#playerInfoBtn').addEventListener('click', () => {
     const box = $('#playerInfo');
     box.hidden = !box.hidden;
-  });
-  $('#setTopModels').addEventListener('click', () => {
-    $('#settings').hidden = true;
-    openFavourites();
-  });
-  $('#favClose').addEventListener('click', () => { $('#fav').hidden = true; });
-
-  // The tag filter re-ranks on every tap: there is nothing to apply, since the
-  // list underneath *is* the result.
-  $('#favTagMode').addEventListener('click', () => {
-    favTagMode = favTagMode === 'all' ? 'any' : 'all';
-    openFavourites();
-  });
-  $('#favClear').addEventListener('click', () => {
-    favTags = new Map();
-    favTagMode = 'all';
-    openFavourites();
   });
   $('#selTag').addEventListener('click', tagSelection);
   $('#selMove').addEventListener('click', openMovePicker);
@@ -3092,7 +2714,6 @@ if (location.hash === '#debug') {
     render, renderAdv, openAdv, applyAdv, resetAdv, filterByLabel,
     openLabels, commitLabels, renderLabelSuggestions,
     buildCard, buildRecordRow, buildFolderLine, filterByName, sortVideos,
-    topModels, videosForModel, tagKeep, openFavourites, renderFavTags, showModel, buildStrip,
     buildModelGroups, buildGroupHead, favouriteModels, isFavouriteModel, toggleFavouriteModel,
     facesFor, suggestionMatch, buildSuggestions, renderPlayerDetails,
     cropFor, cropName, paintCrop, openLineup, closeLineup, stripName, showFrame, clearFrame,
@@ -3101,7 +2722,7 @@ if (location.hash === '#debug') {
     touchedAt, sortVideos,
     atRoot, isLibraryFolder,
     openPlayer, beginPlayback, startPreview, stopPreview, followListing,
-    deleteSelection, openSettings, loadSettings, applyCardWidth,
+
     get soundOn() { return soundOn; }, setSoundOn, playerList,
   };
 }

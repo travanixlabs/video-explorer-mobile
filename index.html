@@ -38,7 +38,6 @@
                 fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
         </svg>
       </button>
-      <button id="setBtn" class="btn icon" title="Settings">⚙</button>
     </div>
   </header>
 
@@ -113,49 +112,6 @@
       <span id="advSummary" class="dim"></span>
       <button id="advApply" class="btn primary">Apply</button>
     </footer>
-  </div>
-</div>
-
-<div id="settings" class="picker" hidden>
-  <div class="picker-card">
-    <header class="picker-head">
-      <span>Settings</span>
-      <button id="settingsClose" class="btn ghost">✕</button>
-    </header>
-    <div class="adv-body">
-      <div class="adv-label">Card width <span id="setCardWidthLabel" class="dim"></span></div>
-      <input id="setCardWidth" type="range" min="240" max="640" step="20">
-      <div class="adv-label">Performers</div>
-      <button id="setTopModels" class="btn ghost">Top performers</button>
-      <div class="adv-label">Videos per fetch</div>
-      <select id="setPageSize" class="sort-select">
-        <option value="50">50</option>
-        <option value="100">100</option>
-        <option value="200">200</option>
-        <option value="400">400</option>
-      </select>
-      <p class="adv-how">Kept on this device, not in the library file.</p>
-    </div>
-  </div>
-</div>
-
-<div id="fav" class="picker" hidden>
-  <div class="picker-card">
-    <header class="picker-head">
-      <span>Top performers</span>
-      <button id="favClose" class="btn ghost">✕</button>
-    </header>
-    <div class="adv-body">
-      <!-- Tags only: this asks which videos count towards the ranking. -->
-      <div class="adv-label">
-        Count only videos tagged
-        <button id="favTagMode" class="mode">all</button>
-        <button id="favClear" class="mode" hidden>clear</button>
-      </div>
-      <div id="favTags" class="chip-row fav-tags"></div>
-      <p id="favHint" class="dim"></p>
-      <div id="favList" class="fav-list"></div>
-    </div>
   </div>
 </div>
 
