@@ -1723,7 +1723,8 @@ function buildCard(video) {
   card.appendChild(meta);
 
   card.appendChild(buildRecordRow(video));
-  card.appendChild(buildFolderLine(video));
+  const line = buildFolderLine(video, { full: false });
+  if (line) card.appendChild(line);
   return card;
 }
 
@@ -1759,31 +1760,37 @@ function buildLabelChips(video, row) {
     }
   }
 
-  const add = document.createElement('button');
-  add.className = 'chip add';
-  add.textContent = (record.tags || []).length ? '+' : '+ tag';
-  add.addEventListener('click', (ev) => {
-    ev.stopPropagation();
-    openLabels([video]);
-  });
-  chips.appendChild(add);
+  // No add-a-label chip here any more. Labelling is a deliberate act and the
+  // selection bar is where it lives: long-press to select, then Tags. A dashed
+  // "+ tag" on every card in a grid of hundreds is a target you hit by
+  // accident far more often than on purpose.
   return chips;
 }
 
 /**
- * Date, folder, and the source page when the record carries one — the same line
- * the desktop puts under a card. The folder matters most with the subfolders
- * flattened, which is the only time a listing mixes them.
+ * Folder, and on the player the date and the source page too.
+ *
+ * The grid gets the folder alone. A date and a hostname under every card is a
+ * line of small print on each of hundreds of them, and neither is what you are
+ * looking at a grid to find out -- the player is where one video is the
+ * subject, and both are still there.
+ *
+ * The folder stays because it earns its place with the subfolders flattened,
+ * which is the only time a listing mixes them and the only time "where is this
+ * one from" is a live question.
  */
-function buildFolderLine(video) {
+function buildFolderLine(video, { full = true } = {}) {
   const record = recordFor(video);
+  const touched = touchedAt(video);
+  const when = full && touched ? new Date(touched).toLocaleDateString() : '';
+  // Nothing to say: no row rather than an empty one holding space open.
+  if (!when && !video.folderName && !(full && record.url)) return null;
+
   const line = document.createElement('div');
   line.className = 'folder-line';
 
   const where = document.createElement('span');
   where.className = 'folder-where';
-  const touched = touchedAt(video);
-  const when = touched ? new Date(touched).toLocaleDateString() : '';
   where.textContent = [when, video.folderName || ''].filter(Boolean).join('  •  ');
   // No hover on a phone, so the file's own date goes in the title for a long
   // press rather than being spelled out on a line this narrow.
@@ -1793,7 +1800,7 @@ function buildFolderLine(video) {
   }
   line.appendChild(where);
 
-  if (record.url) {
+  if (full && record.url) {
     const link = document.createElement('a');
     link.className = 'source-link';
     link.href = record.url;
@@ -2475,7 +2482,8 @@ function renderPlayerDetails(video) {
   box.appendChild(buildRecordRow(video));
   const faces = buildSuggestions(video);
   if (faces) box.appendChild(faces);
-  box.appendChild(buildFolderLine(video));
+  const detail = buildFolderLine(video);
+  if (detail) box.appendChild(detail);
 }
 
 async function openPlayer(video) {

@@ -414,7 +414,6 @@ main { padding: 0 12px 40px; }
   font-size: 11.5px;
   cursor: pointer;
 }
-.chip.add { border-style: dashed; color: var(--text-faint); }
 
 /* The three kinds of label, told apart by colour the way the desktop does it:
    gold for a performer, green for the studio, plain for a tag. Declared after
