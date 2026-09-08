@@ -1174,7 +1174,6 @@ function toggleFavouriteModel(name) {
  */
 function newAdvFilter() {
   return {
-    text: '',
     tags: new Map(),
     models: new Map(),
     studio: new Map(),
@@ -1188,11 +1187,9 @@ function newAdvFilter() {
     // One question, several answers, each independently included or excluded --
     // the same shape as the label facets above, and the same as the desktop.
     favourite: new Map(),       // yes | no
-    link: new Map(),            // yes | no
     suggested: new Map(),       // match | nomatch | faceless | unprofiled
     suggestedCount: new Map(),  // one | many
     suggestedAct: new Map(),    // accepted | rejected | pending
-    folders: new Set(),   // still a Set: these load videos rather than filter them
   };
 }
 
@@ -1207,10 +1204,6 @@ const CHOICES = {
   favourite: {
     yes: (v) => (recordFor(v).models || []).some((m) => isFavouriteModel(m)),
     no: (v) => !(recordFor(v).models || []).some((m) => isFavouriteModel(m)),
-  },
-  link: {
-    yes: (v) => Boolean(recordFor(v).url),
-    no: (v) => !recordFor(v).url,
   },
   suggested: {
     match: (v) => suggestionMatch(v, 'match'),
@@ -1260,10 +1253,6 @@ const CHOICE_ROWS = [
     ['rejected', 'rejected'],
     ['pending', 'pending'],
   ]],
-  ['#advLink', 'link', [
-    ['yes', 'has a link'],
-    ['no', 'no link'],
-  ]],
 ];
 
 /**
@@ -1297,8 +1286,7 @@ let adv = newAdvFilter();
 let advDraft = newAdvFilter();
 
 function advActive(f = adv) {
-  return Boolean(f.text) || f.folders.size
-    || CHOICE_FACETS.some((name) => f[name].size > 0)
+  return CHOICE_FACETS.some((name) => f[name].size > 0)
     || FACETS.some((name) => f[name].size > 0);
 }
 
@@ -1329,11 +1317,6 @@ function vocabularyByName(field) {
 }
 
 function matchesAdv(video) {
-  if (adv.text) {
-    const hay = video.name.toLowerCase();
-    if (!adv.text.split(/\s+/).filter(Boolean).every((t) => hay.includes(t))) return false;
-  }
-
   const record = recordFor(video);
 
   if (adv.ratings.size) {
@@ -1379,11 +1362,10 @@ function openAdv() {
   // Every Map copied, not listed by hand. The draft has to be editable without
   // touching the filter in force -- closing the sheet has to mean cancel -- and
   // a list of facets to clone goes stale the moment a new one is added.
-  advDraft = { ...adv, mode: { ...adv.mode }, folders: new Set(adv.folders) };
+  advDraft = { ...adv, mode: { ...adv.mode } };
   for (const [key, value] of Object.entries(adv)) {
     if (value instanceof Map) advDraft[key] = new Map(value);
   }
-  $('#advText').value = advDraft.text;
   $('#adv').hidden = false;
   renderAdv();
 }
@@ -1454,16 +1436,6 @@ function renderAdv() {
   $('#advTagMode').textContent = advDraft.mode.tags;
   $('#advModelMode').textContent = advDraft.mode.models;
 
-  const folders = $('#advFolders');
-  folders.innerHTML = '';
-  if (!state.folders.length) folders.innerHTML = '<span class="dim">No subfolders here</span>';
-  for (const folder of state.folders) {
-    folders.appendChild(advChip(folder.name, advDraft.folders.has(folder.id) ? 'in' : undefined, () => {
-      toggleIn(advDraft.folders, folder.id);
-      renderAdv();
-    }));
-  }
-
   const bits = [];
   const say = (field, one, many = one + 's') => {
     const inn = picked(advDraft[field], 'in').length;
@@ -1474,7 +1446,6 @@ function renderAdv() {
     if (nothing === 'in') bits.push(`no ${many} at all`);
     if (nothing === 'out') bits.push(`some ${many}`);
   };
-  if (advDraft.folders.size) bits.push(`${advDraft.folders.size} folder${advDraft.folders.size === 1 ? '' : 's'}`);
   say('studio', 'studio', 'studios');
   say('production', 'production', 'productions');
   say('models', 'model');
@@ -1508,20 +1479,11 @@ function cycleIn(facet, value) {
   else facet.delete(value);
 }
 
-function toggleIn(set, value) {
-  if (set.has(value)) set.delete(value);
-  else set.add(value);
-}
-
-async function applyAdv() {
-  advDraft.text = $('#advText').value.trim().toLowerCase();
-  const folders = [...advDraft.folders];
+function applyAdv() {
   adv = advDraft;
   $('#adv').hidden = true;
   $('#advDot').hidden = !advActive();
   $('#advBtn').classList.toggle('on', advActive());
-
-  if (folders.length) await loadFoldersInto(folders);
   gridKey = '';
   render();
 }
@@ -1531,11 +1493,10 @@ async function applyAdv() {
  * which is what the desktop does, and for the same reason: saying "show me
  * everything" should not take two taps.
  */
-async function resetAdv() {
+function resetAdv() {
   advDraft = newAdvFilter();
-  $('#advText').value = '';
   renderAdv();
-  await applyAdv();
+  applyAdv();
 }
 
 /**
@@ -1549,54 +1510,11 @@ function filterByLabel(field, value) {
   advDraft = newAdvFilter();
   $('#search').value = '';
   state.query = '';
-  $('#advText').value = '';
   $('#advDot').hidden = !advActive();
   $('#advBtn').classList.toggle('on', advActive());
   gridKey = '';
   render();
   toast(`${value} — ${filterByName(state.videos).length} here`, 'ok');
-}
-
-/**
- * Pulls every video below each chosen folder into the current view.
- *
- * This is the "including sub-directories" part, and on Graph it is a real walk:
- * one listing per folder, depth-first. It reports progress and stops at a depth
- * limit, because a careless tap at the drive root would otherwise enumerate the
- * entire library.
- */
-async function loadFoldersInto(folderIds) {
-  const run = state.load;
-  const queue = state.folders.filter((f) => folderIds.includes(f.id))
-    .map((f) => ({ driveId: f.driveId, itemId: f.id, name: f.name, depth: 0 }));
-  const MAX_DEPTH = 4;
-  let scanned = 0;
-
-  while (queue.length) {
-    const folder = queue.shift();
-    if (state.load !== run) return; // navigated away
-    setBusy(`Searching ${folder.name}… ${state.videos.length} found`);
-    try {
-      let next = null;
-      do {
-        const page = await graph.listPage(folder.driveId, folder.itemId, next);
-        state.videos.push(...page.videos);
-        next = page.next;
-      } while (next);
-
-      if (folder.depth < MAX_DEPTH) {
-        const subs = await graph.listFolders(folder.driveId, folder.itemId);
-        for (const sub of subs) {
-          queue.push({ driveId: sub.driveId, itemId: sub.id, name: sub.name, depth: folder.depth + 1 });
-        }
-      }
-    } catch (err) {
-      toast(`${folder.name}: ${err.message}`, 'err');
-    }
-    scanned += 1;
-    if (scanned % 3 === 0) { gridKey = ''; render(); }
-  }
-  setBusy('');
 }
 
 // ------------------------------------------------------------ move picker
