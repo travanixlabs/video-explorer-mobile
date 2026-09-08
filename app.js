@@ -2442,7 +2442,6 @@ async function openPlayer(video) {
   syncPlayerNav();
   $('#playerName').textContent = video.name;
   renderPlayerDetails(video);
-  $('#playerInfo').hidden = true;
   syncSoundButton();
   modal.hidden = false;
   setBusy('Opening…');
@@ -2599,10 +2598,6 @@ async function boot() {
   $('#selDelete').addEventListener('click', deleteSelection);
   $('#playerPlay').addEventListener('click', beginPlayback);
   $('#playerSound').addEventListener('click', () => setSoundOn(!soundOn));
-  $('#playerInfoBtn').addEventListener('click', () => {
-    const box = $('#playerInfo');
-    box.hidden = !box.hidden;
-  });
   $('#selTag').addEventListener('click', tagSelection);
   $('#selMove').addEventListener('click', openMovePicker);
   $('#pickerClose').addEventListener('click', () => { $('#picker').hidden = true; });

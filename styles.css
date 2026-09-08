@@ -523,10 +523,19 @@ main { padding: 0 12px 40px; }
 #playerSound.on { color: var(--accent); }
 
 /* The details panel: everything that will not fit in the bar. */
+/* Always on show, so it has to share the screen rather than take it. The cast
+   list and a row of suggested faces can run long; past the cap the panel
+   scrolls on its own instead of pushing the video off the top. */
 .player-info {
   padding: 10px 12px 14px;
   border-top: 1px solid var(--border);
   background: var(--bg-elev);
+  flex: 0 1 auto;
+  max-height: 45vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: calc(14px + env(safe-area-inset-bottom));
 }
 
 .btn.danger { border-color: #6b3535; color: #e8a0a0; }
@@ -705,7 +714,15 @@ body.selecting .tick { opacity: 1; }
 }
 /* The arrows belong to the video, not the whole overlay: centred on the overlay
    they sat half the title bar's height above the browser's own play button. */
-.player-stage { position: relative; flex: 1; min-height: 0; display: flex; }
+/* min-height, not just flex: whatever the details panel below holds, the video
+   keeps a third of the screen. Without a floor a long cast list wins the whole
+   column, because a video element's own contents set its minimum otherwise. */
+.player-stage {
+  position: relative;
+  flex: 1;
+  min-height: 33vh;
+  display: flex;
+}
 #playerVideo { flex: 1; width: 100%; min-height: 0; background: #000; }
 
 /* Beside the play/pause the browser draws in the middle, not over it: the edges
