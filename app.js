@@ -1886,7 +1886,9 @@ function followListing(before) {
   if (list.some((v) => v.id === state.playingId)) return;
   if (!list.length) { closePlayer(); return; }
   const at = before.findIndex((v) => v.id === state.playingId);
-  openPlayer(list[Math.min(at < 0 ? 0 : at, list.length - 1)]);
+  // Forwards, and shown: this move is the app's doing rather than a gesture, so
+  // it needs the cue more than a swipe does, not less.
+  goToVideo(list[Math.min(at < 0 ? 0 : at, list.length - 1)], 1);
 }
 
 function commitLabels(mode) {
@@ -2495,12 +2497,73 @@ function playerList() {
   return filterByName(state.videos).filter((v) => !v.isFolder);
 }
 
+/**
+ * Moving between videos, made visible.
+ *
+ * A swipe that changes everything on screen without moving anything reads as a
+ * glitch rather than a gesture: nothing says which way you went, or that the
+ * picture now belongs to a different video. So the one being left goes out the
+ * way it was pushed and the next comes in from the other side, the way a photo
+ * gallery does.
+ *
+ * Only the picture and the details move. The bar, the arrows and the badge are
+ * the player rather than the video, and chrome that slides with the content
+ * looks like the whole app came loose.
+ *
+ * Returns the second half, to run once the next video is open: the swap happens
+ * while these are off-screen, so the black frame between two sources is never
+ * seen.
+ */
+function slidePlayer(step) {
+  const nothing = () => {};
+  const stage = $('#player .player-stage');
+  if (!stage || typeof stage.animate !== 'function') return nothing;
+  // Somebody who has asked for less movement is not asking for this.
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return nothing;
+
+  const parts = ['#playerVideo', '#playerStrip', '#playerInfo'].map($).filter(Boolean);
+  if (!parts.length) return nothing;
+  // Part of the width, not all of it: enough to read as a direction without the
+  // picture having to cross the whole screen before anything happens.
+  const span = (stage.getBoundingClientRect().width || window.innerWidth) * 0.32;
+
+  // Held out there, so whatever happens underneath happens unseen.
+  const out = parts.map((el) => el.animate(
+    [{ transform: 'translateX(0)', opacity: 1 },
+      { transform: `translateX(${-step * span}px)`, opacity: 0 }],
+    { duration: 130, easing: 'ease-in', fill: 'forwards' },
+  ));
+
+  return () => {
+    const back = parts.map((el) => el.animate(
+      [{ transform: `translateX(${step * span}px)`, opacity: 0 },
+        { transform: 'translateX(0)', opacity: 1 }],
+      { duration: 210, easing: 'cubic-bezier(.2,.7,.3,1)', fill: 'both' },
+    ));
+    // The newer animation wins while it runs, so the held one is dropped only
+    // once this has landed -- cancelling it first would show the old frame
+    // again for a frame, which is the flicker this is meant to avoid.
+    const done = () => { out.forEach((a) => a.cancel()); back.forEach((a) => a.cancel()); };
+    Promise.all(back.map((a) => a.finished)).then(done, done);
+  };
+}
+
+/** Opens another video in the player, with the move shown. */
+async function goToVideo(video, step) {
+  const arrive = slidePlayer(step);
+  const opened = openPlayer(video);
+  // Back on screen when the next one is ready, or shortly regardless: a stream
+  // URL that takes its time must not leave the stage blank while it does.
+  await Promise.race([opened, new Promise((done) => setTimeout(done, 320))]);
+  arrive();
+}
+
 function playSibling(step) {
   const list = playerList();
   if (list.length < 2 || !state.playingId) return;
   const at = list.findIndex((v) => v.id === state.playingId);
   if (at < 0) return;
-  openPlayer(list[((at + step) % list.length + list.length) % list.length]);
+  goToVideo(list[((at + step) % list.length + list.length) % list.length], step);
 }
 
 /** Hides the arrows when there is nowhere to go, and says where you are. */

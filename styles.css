@@ -695,6 +695,9 @@ body.selecting .tick { opacity: 1; }
   background: #000;
   display: flex;
   flex-direction: column;
+  /* The picture slides sideways on the way to the next video. Without this it
+     slides out of the modal instead of out of sight. */
+  overflow: hidden;
 }
 .player[hidden] { display: none; }
 .player-bar {
