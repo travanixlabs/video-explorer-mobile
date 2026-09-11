@@ -2466,6 +2466,23 @@ async function openPlayer(video) {
   if (modal.hidden) playerReturn = pageScrollY(); // only the way in sets the mark
   state.playingId = video.id;
   state.playingAnchor = null; // it is in the listing until an edit says otherwise
+
+  // A <video> goes on painting its last decoded frame until a new source has
+  // enough data to replace it, which over mobile data is about a second. So the
+  // picture sliding in was the video being left, still there, and the strip over
+  // it was that video's frames. Emptied here -- before the wait for the URL
+  // rather than after it, which is what made it a visible second.
+  stopPreview();
+  el.pause();
+  el.removeAttribute('src');
+  el.load();
+  $('#playerBadge').hidden = true;
+  // Graph's thumbnail for the one being opened, when the grid has already
+  // fetched it: then what arrives is the right video rather than black.
+  const poster = thumbCache.get(video.id);
+  if (poster) el.poster = poster;
+  else el.removeAttribute('poster');
+
   syncPlayerNav();
   $('#playerName').textContent = video.name;
   renderPlayerDetails(video);
