@@ -221,14 +221,39 @@ function stripFor(video) {
 /**
  * Paints frame `index` of a strip into an element.
  *
- * Every tile is letterboxed to the same box by the encoder, so the maths is a
- * plain multiple of the tile width and a portrait video is never stretched.
+ * Every tile is letterboxed to the same box by the encoder -- the manifest says
+ * which -- but the element it goes into is not that shape. The player's stage is
+ * whatever height the phone and the details panel leave it, so sizing the sprite
+ * to the element, which is what this did, stretched every frame to fill it. The
+ * <video> underneath letterboxes itself, so the preview and the playthrough were
+ * showing the same picture at two different shapes.
+ *
+ * The tile is fitted to the element and centred instead, in pixels, the way
+ * `contain` would. Measured on every paint rather than remembered: a rotation
+ * changes the answer, and the preview repaints once a second anyway.
  */
 function showFrame(el, url, index, frames) {
   el.style.backgroundImage = `url(${url})`;
-  el.style.backgroundSize = `${frames * 100}% 100%`;
-  el.style.backgroundPosition = `${(index / (frames - 1)) * 100}% 0`;
   el.style.backgroundRepeat = 'no-repeat';
+
+  const box = el.getBoundingClientRect();
+  const geom = state.geom || {};
+  const aspect = geom.tileW > 0 && geom.tileH > 0 ? geom.tileW / geom.tileH : 16 / 9;
+
+  // Nothing to measure -- the element is not laid out yet. Fill it, as this
+  // always did, rather than painting a frame of nothing.
+  if (!(box.width > 0) || !(box.height > 0)) {
+    el.style.backgroundSize = `${frames * 100}% 100%`;
+    el.style.backgroundPosition = `${(index / (frames - 1)) * 100}% 0`;
+    return;
+  }
+
+  let w = box.width;
+  let h = w / aspect;
+  if (h > box.height) { h = box.height; w = h * aspect; }
+
+  el.style.backgroundSize = `${frames * w}px ${h}px`;
+  el.style.backgroundPosition = `${(box.width - w) / 2 - index * w}px ${(box.height - h) / 2}px`;
 }
 
 /**
