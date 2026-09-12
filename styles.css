@@ -225,7 +225,6 @@ main { padding: 0 12px 40px; }
 .chip.face { border-color: #4a4356; background: #221f2b; color: #cfc6dd; }
 .chip.face.band-strong { border-color: #3f7d59; background: #16301f; color: #9fe0bb; }
 .chip.face.band-likely { border-color: #6b5a2f; background: #2a2416; color: #f0c060; }
-.chip.face.on { opacity: 0.65; }
 .chip.face:disabled { pointer-events: none; }
 
 /* --------------------------------------------------------- grouped sections */

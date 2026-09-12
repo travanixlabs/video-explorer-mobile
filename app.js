@@ -1981,28 +1981,30 @@ function commitLabels(mode) {
  * Who the face recognition thinks is in this video, and a tap to credit her.
  *
  * Never applied on its own — the desktop's rule, kept here: a suggestion is an
- * opinion, and putting a name on a video is yours to do. A name already credited
- * shows a tick instead of a plus, since seeing the recognition agree with the
- * label is half of what the feature is for.
+ * opinion, and putting a name on a video is yours to do.
+ *
+ * Only names that are not on it yet. The recogniser still ranks a performer who
+ * is already credited and still agrees with the label; that agreement is just
+ * not a recommendation, and it was a chip that could not be tapped sitting in a
+ * row where every other one can be. With nothing left to offer there is no row.
  */
 function buildSuggestions(video) {
-  const { profiled, suggested } = facesFor(video);
-  if (!state.faces || !profiled || !suggested.length) return null;
+  const { profiled, suggested: ranked } = facesFor(video);
+  if (!state.faces || !profiled || !ranked.length) return null;
+
+  const named = new Set((recordFor(video).models || []).map((m) => m.toLowerCase()));
+  const suggested = ranked.filter((s) => !named.has(String(s.name).toLowerCase()));
+  if (!suggested.length) return null;
 
   const row = document.createElement('div');
   row.className = 'suggests';
 
-  const named = new Set((recordFor(video).models || []).map((m) => m.toLowerCase()));
-  const fresh = suggested.filter((s) => !named.has(String(s.name).toLowerCase())).length;
-
   const lead = document.createElement('span');
   lead.className = 'suggests-lead';
-  lead.textContent = fresh === 0 ? 'All credited'
-    : (named.size ? `Also looks like · ${fresh} not credited` : 'Looks like');
+  lead.textContent = named.size ? 'Also looks like' : 'Looks like';
   row.appendChild(lead);
 
   for (const one of suggested) {
-    const on = named.has(String(one.name).toLowerCase());
     const wrap = document.createElement('span');
     wrap.className = 'face-pair';
 
@@ -2017,23 +2019,21 @@ function buildSuggestions(video) {
     look.addEventListener('click', (ev) => { ev.stopPropagation(); openLineup(one.name); });
     wrap.appendChild(look);
 
+    // Always a plus: every chip here is a name not on the video yet.
     const chip = document.createElement('button');
-    chip.className = 'chip face' + (on ? ' on' : '') + ` band-${one.band || 'maybe'}`;
-    chip.textContent = `${one.name} ${Math.round((one.score || 0) * 100)}% ${on ? '\u2713' : '+'}`;
-    chip.disabled = on;
-    if (!on) {
-      chip.addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        const before = playerList();
-        editRecord(video, { models: [...(recordFor(video).models || []), one.name] });
-        // Redraw for whatever is open now, which an edit that filters the
-        // listing may already have changed.
-        const open = playerList().find((v) => v.id === state.playingId);
-        if (open) renderPlayerDetails(open);
-        if (advActive()) { render(); followListing(before); }
-        toast(`${one.name} added`, 'ok');
-      });
-    }
+    chip.className = `chip face band-${one.band || 'maybe'}`;
+    chip.textContent = `${one.name} ${Math.round((one.score || 0) * 100)}% +`;
+    chip.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const before = playerList();
+      editRecord(video, { models: [...(recordFor(video).models || []), one.name] });
+      // Redraw for whatever is open now, which an edit that filters the
+      // listing may already have changed.
+      const open = playerList().find((v) => v.id === state.playingId);
+      if (open) renderPlayerDetails(open);
+      if (advActive()) { render(); followListing(before); }
+      toast(`${one.name} added`, 'ok');
+    });
     wrap.appendChild(chip);
     row.appendChild(wrap);
   }
