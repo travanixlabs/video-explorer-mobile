@@ -35,13 +35,15 @@ const state = {
   selecting: false,   // selection mode: taps toggle instead of scrubbing
   cardWidth: 320,     // per-device, not a judgement about a video; the CSS default
   pageSize: 200,
+  loading: false,     // a folder is still streaming in
   selected: new Set(), // item ids
 };
 
 /**
- * Thumbnails are fetched for cards you can actually see, 20 per Graph $batch
- * call. Expanding them into the listing instead cost 6s per page against 0.7s
- * plain, on every page whether or not you scrolled that far.
+ * Every card's thumbnail is fetched, on screen or not, 20 per Graph $batch
+ * call and one call at a time. Expanding them into the listing itself is still
+ * refused -- that cost 6s per page against 0.7s plain -- so they come as their
+ * own requests behind the grid, in the order the cards were built.
  */
 const wanted = new Map(); // item id -> the .shot element waiting for a URL
 // Client-side sorting means the grid gets rebuilt rather than appended to, so
@@ -49,21 +51,39 @@ const wanted = new Map(); // item id -> the .shot element waiting for a URL
 const thumbCache = new Map(); // item id -> url
 let thumbTimer = null;
 
-const thumbObserver = new IntersectionObserver((entries) => {
-  for (const entry of entries) {
-    if (!entry.isIntersecting) continue;
-    thumbObserver.unobserve(entry.target);
-    wanted.set(entry.target.dataset.id, entry.target);
-  }
-  // Coalesce a burst of intersections from one scroll into a single batch.
+/** Asks for one card's thumbnail. The wait coalesces a render into one batch. */
+function wantThumb(el) {
+  wanted.set(el.dataset.id, el);
   clearTimeout(thumbTimer);
   thumbTimer = setTimeout(flushThumbs, 120);
-}, { rootMargin: '600px 0px' });
+}
+
+// One call in flight at a time. A folder of five thousand is two hundred and
+// fifty batches, and firing those together is how you get throttled by Graph
+// rather than how you get thumbnails.
+let flushing = false;
 
 async function flushThumbs() {
-  if (!wanted.size) return;
-  const batch = [...wanted.entries()].slice(0, 20);
-  for (const [id] of batch) wanted.delete(id);
+  if (flushing) return;
+  flushing = true;
+  try {
+    while (wanted.size) await flushBatch();
+  } finally {
+    flushing = false;
+  }
+}
+
+async function flushBatch() {
+  const batch = [];
+  for (const [id, el] of wanted) {
+    wanted.delete(id);
+    // Its card was thrown away by a re-render before its turn came. The rebuilt
+    // one asks again, so dropping it here costs nothing and saves a request.
+    if (!el.isConnected) continue;
+    batch.push([id, el]);
+    if (batch.length === 20) break;
+  }
+  if (!batch.length) return;
 
   const items = batch.map(([id, el]) => ({ id, driveId: el.dataset.drive }));
   try {
@@ -75,8 +95,6 @@ async function flushThumbs() {
       if (el.isConnected) el.style.backgroundImage = `url("${url}")`;
     }
   } catch { /* a missing thumbnail is a blank tile, not an error worth a toast */ }
-
-  if (wanted.size) flushThumbs();
 }
 
 // --------------------------------------------------------------- utilities
@@ -450,26 +468,51 @@ async function openFolder(entry, { push = true } = {}) {
     if (state.load === run) toast(err.message, 'err');
   });
 
-  await loadMore(state.flatten ? FLAT_PAGES : AUTO_PAGES);
+  await loadMore();
 }
 
-// Pages pulled without being asked. Three is roughly 600 videos — enough that
-// most folders finish on their own, while the 5,000-video ones stop before
-// they have put that many cards into a phone's DOM.
-const AUTO_PAGES = 3;
-// Flattened, a page is one folder's worth rather than 200 videos, and a folder
-// of a dozen clips is common — three of those would barely fill a screen.
-const FLAT_PAGES = 10;
+/**
+ * A redraw during a load, at most a few a second.
+ *
+ * Appending a page is cheap, but a grid held in any order other than the
+ * server's own has to be rebuilt when one lands — and a folder that now streams
+ * all the way through lands twenty-five of them rather than three. Tied to the
+ * clock instead of to the pages, the cost of loading a large folder stops
+ * growing with the square of its size.
+ */
+let redrawAt = 0;
+let redrawTimer = null;
+const REDRAW_MS = 400;
+
+function renderSoon() {
+  const wait = redrawAt + REDRAW_MS - Date.now();
+  if (wait <= 0) {
+    clearTimeout(redrawTimer);
+    redrawTimer = null;
+    redrawAt = Date.now();
+    render();
+    return;
+  }
+  if (redrawTimer) return; // one is already coming
+  redrawTimer = setTimeout(() => { redrawTimer = null; renderSoon(); }, wait);
+}
 
 /** Whether anything is left to load, in either mode. */
 function moreToLoad() {
   return state.flatten ? Boolean(state.walk) : Boolean(state.next);
 }
 
-async function loadMore(pages = 1) {
+/**
+ * Pulls the folder until there is nothing left of it. Graph hands out 200 at a
+ * time and a walk hands out a folder at a time, so the pages are the API's, not
+ * the listing's: the grid grows as they land and never stops part-way waiting
+ * to be asked. It used to stop at three pages behind a "Load more" button,
+ * which on a five-thousand-video folder meant most of it was simply not there.
+ */
+async function loadMore() {
   const { driveId, itemId, run } = state.source;
-  let remaining = pages;
 
+  state.loading = true;
   try {
     do {
       if (state.flatten && !state.walk) return; // the walk finished
@@ -496,14 +539,22 @@ async function loadMore(pages = 1) {
       } else {
         state.next = page.next;
       }
-      remaining -= 1;
-      render();
-      setBusy(moreToLoad() && remaining > 0 ? 'Loading more…' : '');
-    } while (moreToLoad() && remaining > 0);
+      renderSoon();
+      setBusy(moreToLoad() ? `Loading… ${state.videos.length} so far` : '');
+    } while (moreToLoad());
   } catch (err) {
     if (state.load === run) {
       toast(err.message, 'err');
       setBusy('');
+    }
+  } finally {
+    // Whether it finished or stopped on an error, it is no longer running --
+    // and the button that offers to pick it up again is shown on that.
+    if (state.load === run) {
+      state.loading = false;
+      clearTimeout(redrawTimer);
+      redrawTimer = null;
+      render();   // the whole folder, in order, whatever the throttle skipped
     }
   }
 }
@@ -1002,9 +1053,12 @@ function renderVideos() {
       + (moreToLoad() ? ' so far' : '')
     : (moreToLoad() ? 'Loading…' : 'No videos here');
 
+  // Nothing is left to press: a folder loads all the way through on its own.
+  // The button is only there when the run stopped early -- an error, or the
+  // network going out mid-folder -- so there is a way to pick it back up.
   const more = $('#loadMore');
-  more.hidden = !moreToLoad();
-  more.textContent = `Load more (${state.videos.length} loaded)`;
+  more.hidden = !moreToLoad() || state.loading;
+  more.textContent = `Resume loading (${state.videos.length} so far)`;
 }
 
 // -------------------------------------------------------------- selection
@@ -1679,7 +1733,7 @@ function buildCard(video) {
   shot.dataset.drive = video.driveId;
   const cached = thumbCache.get(video.id);
   if (cached) shot.style.backgroundImage = `url("${cached}")`;
-  else thumbObserver.observe(shot);
+  else wantThumb(shot);
 
   const scrubHint = document.createElement('div');
   scrubHint.className = 'scrub-hint';
@@ -2648,7 +2702,7 @@ async function boot() {
   $('#playerNext').addEventListener('click', () => playSibling(1));
   attachPlayerSwipe();
   watchOverlays();
-  $('#loadMore').addEventListener('click', () => loadMore(state.flatten ? FLAT_PAGES : AUTO_PAGES));
+  $('#loadMore').addEventListener('click', () => loadMore());
 
   // Flatten is a view you reach for rather than a mode you live in, so it is not
   // persisted -- same as the desktop, which resets it at every launch.
