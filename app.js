@@ -2451,6 +2451,11 @@ async function startStripPreview(video) {
   el.pause();
   preview.onPlay = () => { if (preview.mode === 'strip') el.pause(); };
   el.addEventListener('play', preview.onPlay);
+  // And off the stage. One or the other is showing, never both: the strip is
+  // cropped to the frame it is on, so anything the crop does not cover would be
+  // the video underneath it. Hidden rather than removed -- it goes on buffering
+  // for the tap that is coming.
+  el.style.visibility = 'hidden';
 
   shade.hidden = false;
   $('#playerPlay').hidden = false;
@@ -2529,6 +2534,7 @@ function stopPreview() {
       el.removeEventListener('play', preview.onPlay);
       preview.onPlay = null;
     }
+    el.style.visibility = '';   // the stage goes back to the video
   }
   const shade = $('#playerStrip');
   if (shade) { shade.hidden = true; clearFrame(shade); }
