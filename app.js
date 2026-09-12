@@ -263,6 +263,7 @@ function showFrame(el, url, index, frames) {
   if (!(box.width > 0) || !(box.height > 0)) {
     el.style.backgroundSize = `${frames * 100}% 100%`;
     el.style.backgroundPosition = `${(index / (frames - 1)) * 100}% 0`;
+    el.style.clipPath = '';
     return;
   }
 
@@ -270,8 +271,17 @@ function showFrame(el, url, index, frames) {
   let h = w / aspect;
   if (h > box.height) { h = box.height; w = h * aspect; }
 
+  const x = (box.width - w) / 2;
+  const y = (box.height - h) / 2;
   el.style.backgroundSize = `${frames * w}px ${h}px`;
-  el.style.backgroundPosition = `${(box.width - w) / 2 - index * w}px ${(box.height - h) / 2}px`;
+  el.style.backgroundPosition = `${x - index * w}px ${y}px`;
+  // The image is ten frames wide. Fitting one into the middle of a box wider
+  // than a frame leaves the ones AFTER it in the margin to the right -- small
+  // pictures beside the preview, over a video playing behind them. A card's
+  // .shot is exactly a frame's shape, so nothing is cropped there.
+  el.style.clipPath = x > 0.5 || y > 0.5
+    ? `inset(${y}px ${box.width - w - x}px ${box.height - h - y}px ${x}px)`
+    : '';
 }
 
 /**
@@ -285,6 +295,7 @@ function clearFrame(el, poster = '') {
   el.style.backgroundImage = poster ? `url("${poster}")` : '';
   el.style.backgroundSize = poster ? 'cover' : '';
   el.style.backgroundPosition = poster ? 'center' : '';
+  el.style.clipPath = '';
 }
 
 /**
