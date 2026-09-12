@@ -2417,7 +2417,16 @@ function syncSoundButton() {
  * It is the one open stream being seeked, not ten requests — the same ranged
  * URL the element is already reading.
  */
-const preview = { timer: null, index: 0, count: 10, wanted: false };
+/**
+ * `mode` is which preview owns the stage: 'seek' drives the video itself, while
+ * 'strip' paints a picture over it and the video must be still. Nothing may play
+ * while it is 'strip' -- a video moving behind a photograph is neither of the
+ * two things the stage is meant to be showing.
+ */
+const preview = {
+  timer: null, index: 0, count: 10, wanted: false,
+  mode: null, onMeta: null, onPlay: null,
+};
 
 /**
  * The ten-frame preview, from the strip when there is one.
@@ -2433,7 +2442,16 @@ async function startStripPreview(video) {
   const el = $('#playerVideo');
   const shade = $('#playerStrip');
 
+  preview.mode = 'strip';
+  // The seeking preview may have been running while the strip was fetched, and
+  // a stream reports its duration late enough to land after this. Its listener
+  // comes off with its turn, and nothing may start the element while a picture
+  // is over it -- buffering behind the strip is wanted, playing is not.
+  dropSeekListener(el);
   el.pause();
+  preview.onPlay = () => { if (preview.mode === 'strip') el.pause(); };
+  el.addEventListener('play', preview.onPlay);
+
   shade.hidden = false;
   $('#playerPlay').hidden = false;
   $('#playerBadge').hidden = false;
@@ -2462,6 +2480,13 @@ function startPreview() {
   seekPreview();
 }
 
+/** Takes the held metadata listener off, if one is waiting. */
+function dropSeekListener(el) {
+  if (!preview.onMeta) return;
+  el.removeEventListener('loadedmetadata', preview.onMeta);
+  preview.onMeta = null;
+}
+
 function seekPreview() {
   const el = $('#playerVideo');
   el.controls = false;
@@ -2469,8 +2494,14 @@ function seekPreview() {
   $('#playerPlay').hidden = false;
   $('#playerBadge').hidden = false;
   preview.index = 0;
+  preview.mode = 'seek';
 
   const show = (index) => {
+    // The preview is over -- the play button was pressed, or the strip took the
+    // stage while this was waiting on a duration. Seeking and playing now would
+    // drag a playthrough back a tenth of the way in, or set a video moving
+    // behind a still picture.
+    if (preview.mode !== 'seek') return;
     preview.index = index;
     const duration = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : 0;
     if (!duration) return; // metadata still coming; the timer retries
@@ -2480,13 +2511,25 @@ function seekPreview() {
     $('#playerBadge').textContent = `${index + 1}/${preview.count} · ${fmtTime(at)}`;
   };
 
-  el.addEventListener('loadedmetadata', () => show(0), { once: true });
+  // Held rather than left to `once`, which never removes a listener that never
+  // fires: a stream can report its duration long after the preview is over.
+  preview.onMeta = () => show(0);
+  el.addEventListener('loadedmetadata', preview.onMeta);
   if (el.readyState >= 1) show(0);
   preview.timer = setInterval(() => show((preview.index + 1) % preview.count), 1000);
 }
 
 function stopPreview() {
   preview.wanted = false;
+  preview.mode = null;
+  const el = $('#playerVideo');
+  if (el) {
+    dropSeekListener(el);
+    if (preview.onPlay) {
+      el.removeEventListener('play', preview.onPlay);
+      preview.onPlay = null;
+    }
+  }
   const shade = $('#playerStrip');
   if (shade) { shade.hidden = true; clearFrame(shade); }
   clearInterval(preview.timer);
