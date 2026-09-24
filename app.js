@@ -541,7 +541,9 @@ async function loadMore() {
         // walk needs no extra request per folder.
         for (const video of page.videos) video.folderName = state.walk.name || '';
         state.queue.push(...page.folders.map((f) => ({
-          driveId: f.driveId, itemId: f.id, name: f.name,
+          // Without a drive of its own a subfolder is in the one holding it;
+          // passing the gap on asks Graph for /drives/null/items/… .
+          driveId: f.driveId || state.walk.driveId, itemId: f.id, name: f.name,
         })));
         state.walk = page.next
           ? { ...state.walk, next: page.next }
@@ -1499,10 +1501,55 @@ const shuffle = {
   // does not come round again until the pool has been through.
   seen: [],
   at: -1,
+  // Which library folders it drew from: the ones picked in the sheet, or the
+  // folder in hand when none were. Held as ids, since that is what a walk needs.
+  dirs: new Set(),
+  draftDirs: new Set(),
   // Bumped on every start, so a walk whose sheet was closed and reopened
   // cannot pour its results into the run that replaced it.
   run: 0,
 };
+
+/**
+ * The library's own top-level folders -- Folder 0, Folder 1, and so on at the
+ * root of the drive. Read once and kept: a handful of entries that change
+ * about never, and the sheet should not wait on a Graph call to open.
+ */
+let shuffleRoots = null;
+
+async function loadShuffleRoots() {
+  if (shuffleRoots) return shuffleRoots;
+  try {
+    shuffleRoots = (await graph.listFolders(null, null)).filter(isLibraryFolder);
+  } catch {
+    // No row rather than an error: the folder you are standing in still works.
+    shuffleRoots = [];
+  }
+  return shuffleRoots;
+}
+
+/** The picked folders, as the walk wants them. */
+function shuffleDirs(ids = shuffle.draftDirs) {
+  return (shuffleRoots || []).filter((f) => ids.has(f.id));
+}
+
+/** "Folder 1", "Folder 1 and Folder 4", "Folder 1, Folder 2 and Folder 4". */
+function listOf(names) {
+  if (names.length < 2) return names[0] || '';
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
+function shuffleWhere() {
+  const picked = shuffleDirs().map((f) => f.name);
+  if (picked.length) {
+    return `Anything in ${listOf(picked)} and every folder under`
+      + ` ${picked.length > 1 ? 'them' : 'it'}.`;
+  }
+  const here = state.stack.length ? state.stack[state.stack.length - 1].name : '';
+  return here
+    ? `Anything in ${here} and every folder under it.`
+    : 'Anything in here and every folder under it.';
+}
 
 function openShuffle() {
   shuffle.draft = newAdvFilter();
@@ -1512,15 +1559,33 @@ function openShuffle() {
       shuffle.draft[facet] = new Map(shuffle.filter[facet]);
     }
   }
-  const here = state.stack.length ? state.stack[state.stack.length - 1].name : '';
-  $('#shuffleWhere').textContent = here
-    ? `Anything in ${here} and every folder under it.`
-    : 'Anything in here and every folder under it.';
+  shuffle.draftDirs = new Set(shuffle.dirs);
   $('#shuffle').hidden = false;
   renderShuffle();
+  // The row fills in when the listing lands, without holding the sheet shut.
+  loadShuffleRoots().then(() => {
+    if (!$('#shuffle').hidden) renderShuffle();
+  });
+}
+
+function renderShuffleDirs() {
+  const roots = shuffleRoots || [];
+  $('#shuffleDirsLabel').hidden = !roots.length;
+  $('#shuffleDirs').hidden = !roots.length;
+  const box = $('#shuffleDirs');
+  box.innerHTML = '';
+  for (const root of roots) {
+    // Picked or not -- there is no "everything but Folder 3" worth a third state.
+    box.appendChild(advChip(root.name, shuffle.draftDirs.has(root.id) ? 'in' : '', () => {
+      if (!shuffle.draftDirs.delete(root.id)) shuffle.draftDirs.add(root.id);
+      renderShuffle();
+    }));
+  }
+  $('#shuffleWhere').textContent = shuffleWhere();
 }
 
 function renderShuffle() {
+  renderShuffleDirs();
   const ratings = $('#shuffleRating');
   ratings.innerHTML = '';
   for (const value of [0, 1, 2, 3, 4, 5]) {
@@ -1571,19 +1636,43 @@ function renderShuffle() {
  * private array rather than the grid, so the listing behind the player is
  * untouched when you come back to it.
  */
-async function shufflePool(run, onCount) {
-  if (state.flatten && !moreToLoad() && !state.loading) {
+async function shufflePool(run, onCount, skipped = []) {
+  const roots = shuffleDirs(shuffle.dirs);
+  // The listing already knows the answer only when it is the whole tree AND the
+  // tree asked for is the one on screen.
+  if (!roots.length && state.flatten && !moreToLoad() && !state.loading) {
     return state.videos.filter((v) => !v.isFolder);
   }
   const { driveId, itemId } = state.source || {};
   const found = [];
-  let here = { driveId, itemId, next: null };
-  const queue = [];
+  const queue = roots.map((f) => ({
+    driveId: f.driveId, itemId: f.id, name: f.name, next: null,
+  }));
+  let here = roots.length
+    ? queue.shift()
+    : { driveId, itemId, name: '', next: null };
   while (here) {
-    const page = await graph.listChildren(here.driveId, here.itemId, here.next);
+    let page;
+    try {
+      page = await graph.listChildren(here.driveId, here.itemId, here.next);
+    } catch (err) {
+      // With nothing else to try, the error is the answer. Otherwise it is not:
+      // a tree of thousands should not lose its evening because one folder in
+      // it cannot be listed, which Graph does for shortcuts to drives it will
+      // not hand over ("ObjectHandle is Invalid") and for the odd random 400.
+      if (!found.length && !queue.length) throw err;
+      skipped.push(here.name || 'a folder');
+      here = queue.shift() || null;
+      continue;
+    }
     if (shuffle.run !== run) return [];    // the sheet was closed, or restarted
     found.push(...page.videos);
-    queue.push(...page.folders.map((f) => ({ driveId: f.driveId, itemId: f.id, next: null })));
+    // A subfolder that arrives without a drive of its own lives in the same
+    // drive as the folder holding it; passing its missing id straight back to
+    // Graph asks for /drives/null/items/… and loses the whole walk.
+    queue.push(...page.folders.map((f) => ({
+      driveId: f.driveId || here.driveId, itemId: f.id, name: f.name, next: null,
+    })));
     onCount(found.length);
     here = page.next ? { ...here, next: page.next } : (queue.shift() || null);
   }
@@ -1592,16 +1681,25 @@ async function shufflePool(run, onCount) {
 
 async function startShuffle() {
   shuffle.filter = shuffle.draft;
+  // Folders picked in the sheet win over the one you are standing in; with none
+  // picked it is the folder in hand, as it always was.
+  shuffle.dirs = new Set(shuffle.draftDirs);
   const run = shuffle.run + 1;
   shuffle.run = run;
 
   const start = $('#shuffleStart');
   start.disabled = true;
   $('#shuffleSummary').textContent = 'Looking…';
+  const skipped = [];
   try {
     const all = await shufflePool(run, (n) => {
       if (shuffle.run === run) $('#shuffleSummary').textContent = `Looking… ${n} so far`;
-    });
+    }, skipped);
+    if (skipped.length) {
+      toast(skipped.length === 1
+        ? `Skipped ${skipped[0]} — OneDrive would not list it`
+        : `Skipped ${skipped.length} folders OneDrive would not list`, 'err');
+    }
     if (shuffle.run !== run) return;
     shuffle.pool = all.filter((v) => matchesFilter(v, shuffle.filter));
     shuffle.seen = [];
@@ -1609,7 +1707,7 @@ async function startShuffle() {
     if (!shuffle.pool.length) {
       $('#shuffleSummary').textContent = all.length
         ? `Nothing here matches — ${all.length} videos, none of them`
-        : 'No videos under this folder';
+        : `No videos under ${shuffle.dirs.size > 1 ? 'those folders' : 'this folder'}`;
       return;
     }
     shuffle.on = true;
@@ -2923,6 +3021,11 @@ async function boot() {
   $('#shuffleStart').addEventListener('click', startShuffle);
   $('#shuffleReset').addEventListener('click', () => {
     shuffle.draft = newAdvFilter();
+    shuffle.draftDirs.clear();
+    renderShuffle();
+  });
+  $('#shuffleDirsClear').addEventListener('click', () => {
+    shuffle.draftDirs.clear();
     renderShuffle();
   });
   $('#shuffleTagMode').addEventListener('click', () => {

@@ -123,6 +123,14 @@
     <div class="adv-body">
       <p class="adv-how" id="shuffleWhere"></p>
 
+      <!-- Where, before what: picking a library folder here overrides the one
+           you are standing in, so an evening can span Folder 1 and Folder 4
+           without navigating anywhere first. -->
+      <div class="adv-label" id="shuffleDirsLabel" hidden>
+        Folders <button id="shuffleDirsClear" class="mode">clear</button>
+      </div>
+      <div id="shuffleDirs" class="chip-row" hidden></div>
+
       <div class="adv-label">Tags <button id="shuffleTagMode" class="mode">all</button></div>
       <div id="shuffleTags" class="chip-row"></div>
 
