@@ -1505,6 +1505,9 @@ const shuffle = {
   // folder in hand when none were. Held as ids, since that is what a walk needs.
   dirs: new Set(),
   draftDirs: new Set(),
+  // Whether the tree is still arriving. The pool is playable long before the
+  // walk finishes, and the readout says so rather than pretending to be final.
+  walking: false,
   // Bumped on every start, so a walk whose sheet was closed and reopened
   // cannot pour its results into the run that replaced it.
   run: 0,
@@ -1627,56 +1630,80 @@ function renderShuffle() {
 }
 
 /**
- * Every video below the folder in hand.
+ * Every video below the folder in hand, handed over as it arrives.
  *
- * The listing already knows them when it is flattened and has finished
+ * Two things make this bearable on a phone. It goes a level at a time, twenty
+ * folders per round trip, because a tree of fifty folders walked one at a time
+ * is fifty waits on a mobile connection -- a measured minute on a library
+ * folder of five thousand. And it hands each round to its caller rather than
+ * returning at the end, so the first video can be playing while the rest of the
+ * tree is still arriving.
+ *
+ * The listing already knows the answer when it is flattened and has finished
  * streaming, and re-walking thousands of items over the network to learn what
- * is already in memory would be minutes of waiting for nothing. Otherwise this
- * does its own walk -- the same breadth-first pass loadMore makes, into a
- * private array rather than the grid, so the listing behind the player is
- * untouched when you come back to it.
+ * is already in memory would be minutes of waiting for nothing.
+ *
+ * Everything lands in a private array either way, so the listing behind the
+ * player is untouched when you come back to it.
  */
-async function shufflePool(run, onCount, skipped = []) {
+async function shufflePool(run, onPage, skipped = []) {
   const roots = shuffleDirs(shuffle.dirs);
   // The listing already knows the answer only when it is the whole tree AND the
   // tree asked for is the one on screen.
   if (!roots.length && state.flatten && !moreToLoad() && !state.loading) {
-    return state.videos.filter((v) => !v.isFolder);
+    onPage(state.videos.filter((v) => !v.isFolder));
+    return;
   }
   const { driveId, itemId } = state.source || {};
-  const found = [];
-  const queue = roots.map((f) => ({
-    driveId: f.driveId, itemId: f.id, name: f.name, next: null,
-  }));
-  let here = roots.length
-    ? queue.shift()
-    : { driveId, itemId, name: '', next: null };
-  while (here) {
-    let page;
+  const queue = roots.length
+    ? roots.map((f) => ({ driveId: f.driveId, itemId: f.id, name: f.name, next: null }))
+    : [{ driveId, itemId, name: '', next: null }];
+  let found = 0;
+  let refused = '';
+
+  while (queue.length) {
+    const round = queue.splice(0, graph.BATCH);
+    let pages;
     try {
-      page = await graph.listChildren(here.driveId, here.itemId, here.next);
+      pages = await graph.listChildrenBatch(round);
     } catch (err) {
-      // With nothing else to try, the error is the answer. Otherwise it is not:
-      // a tree of thousands should not lose its evening because one folder in
-      // it cannot be listed, which Graph does for shortcuts to drives it will
-      // not hand over ("ObjectHandle is Invalid") and for the odd random 400.
-      if (!found.length && !queue.length) throw err;
-      skipped.push(here.name || 'a folder');
-      here = queue.shift() || null;
-      continue;
+      // Nothing to show for it: the error is the answer. Otherwise the pool is
+      // what it is -- better a shuffle over most of the tree than none.
+      if (!found) throw err;
+      skipped.push(...round.map((spot) => spot.name || 'a folder'));
+      return;
     }
-    if (shuffle.run !== run) return [];    // the sheet was closed, or restarted
-    found.push(...page.videos);
-    // A subfolder that arrives without a drive of its own lives in the same
-    // drive as the folder holding it; passing its missing id straight back to
-    // Graph asks for /drives/null/items/… and loses the whole walk.
-    queue.push(...page.folders.map((f) => ({
-      driveId: f.driveId || here.driveId, itemId: f.id, name: f.name, next: null,
-    })));
-    onCount(found.length);
-    here = page.next ? { ...here, next: page.next } : (queue.shift() || null);
+    if (shuffle.run !== run) return;     // the sheet was closed, or restarted
+
+    const videos = [];
+    pages.forEach((page, at) => {
+      const spot = round[at];
+      if (page.failed) {
+        // Once more before giving up on it: a 429 or a 503 is a bad moment
+        // rather than a bad folder. A second refusal costs that folder alone,
+        // which Graph hands out for shortcuts to drives it will not open
+        // ("ObjectHandle is Invalid") and for the odd random 400.
+        if (!spot.tried) queue.push({ ...spot, tried: true });
+        else { skipped.push(spot.name || 'a folder'); refused = page.failed; }
+        return;
+      }
+      videos.push(...page.videos);
+      if (page.next) queue.push({ ...spot, next: page.next, tried: false });
+      // A subfolder that arrives without a drive of its own lives in the same
+      // drive as the folder holding it; passing its missing id straight back to
+      // Graph asks for /drives/null/items/… and loses the whole walk.
+      queue.push(...page.folders.map((f) => ({
+        driveId: f.driveId || spot.driveId, itemId: f.id, name: f.name, next: null,
+      })));
+    });
+
+    found += videos.length;
+    if (videos.length) onPage(videos);
   }
-  return found;
+
+  // Nothing anywhere, and something was refused: that refusal is the answer,
+  // rather than a quiet "no videos here" over a folder full of them.
+  if (!found && refused) throw new Error(refused);
 }
 
 async function startShuffle() {
@@ -1690,31 +1717,49 @@ async function startShuffle() {
   const start = $('#shuffleStart');
   start.disabled = true;
   $('#shuffleSummary').textContent = 'Looking…';
+  shuffle.pool = [];
+  shuffle.seen = [];
+  shuffle.at = -1;
+  shuffle.walking = true;
   const skipped = [];
+  let seen = 0;
+
   try {
-    const all = await shufflePool(run, (n) => {
-      if (shuffle.run === run) $('#shuffleSummary').textContent = `Looking… ${n} so far`;
+    await shufflePool(run, (videos) => {
+      if (shuffle.run !== run) return;
+      seen += videos.length;
+      shuffle.pool.push(...videos.filter((v) => matchesFilter(v, shuffle.filter)));
+      if (shuffle.on) {
+        // Watching already: the count under the player grows as the rest lands.
+        syncPlayerNav();
+      } else if (shuffle.pool.length) {
+        // The first thing that matches starts the evening. The rest of the tree
+        // keeps arriving behind the player, and the pool grows into it.
+        shuffle.on = true;
+        $('#shuffle').hidden = true;
+        syncShuffleBadge();
+        shuffleStep(1);
+      } else {
+        $('#shuffleSummary').textContent = `Looking… ${seen} so far`;
+      }
     }, skipped);
+    if (shuffle.run !== run) return;
+    shuffle.walking = false;
     if (skipped.length) {
       toast(skipped.length === 1
         ? `Skipped ${skipped[0]} — OneDrive would not list it`
         : `Skipped ${skipped.length} folders OneDrive would not list`, 'err');
     }
-    if (shuffle.run !== run) return;
-    shuffle.pool = all.filter((v) => matchesFilter(v, shuffle.filter));
-    shuffle.seen = [];
-    shuffle.at = -1;
-    if (!shuffle.pool.length) {
-      $('#shuffleSummary').textContent = all.length
-        ? `Nothing here matches — ${all.length} videos, none of them`
+    if (!shuffle.on) {
+      $('#shuffleSummary').textContent = seen
+        ? `Nothing here matches — ${seen} videos, none of them`
         : `No videos under ${shuffle.dirs.size > 1 ? 'those folders' : 'this folder'}`;
       return;
     }
-    shuffle.on = true;
-    $('#shuffle').hidden = true;
-    syncShuffleBadge();
-    shuffleStep(1);
+    syncPlayerNav();
   } catch (err) {
+    if (shuffle.run !== run) return;
+    shuffle.walking = false;
     $('#shuffleSummary').textContent = '';
     toast(err.message, 'err');
   } finally {
@@ -1765,6 +1810,7 @@ function stopShuffle() {
   shuffle.pool = [];
   shuffle.seen = [];
   shuffle.at = -1;
+  shuffle.walking = false;
   shuffle.run += 1;   // abandon any walk still running
   syncShuffleBadge();
 }
@@ -2894,7 +2940,10 @@ function syncPlayerNav() {
     $('#playerNext').hidden = shuffle.pool.length < 2;
     const pos = $('#playerPos');
     pos.hidden = false;
-    pos.textContent = `🔀 ${shuffle.at + 1} of ${shuffle.pool.length}`;
+    // A trailing + while the tree is still arriving: the pool it is drawing
+    // from is real, and still growing.
+    pos.textContent = `🔀 ${shuffle.at + 1} of ${shuffle.pool.length}`
+      + (shuffle.walking ? '+' : '');
     return;
   }
   const list = playerList();

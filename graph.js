@@ -175,6 +175,69 @@ export async function listChildren(driveId, itemId, next = null) {
 }
 
 /**
+ * Twenty listings in one round trip.
+ *
+ * A walk down a tree is dominated by latency rather than by bytes: a folder of
+ * fifty subfolders is fifty sequential requests, each a phone's round trip to
+ * Graph, and that is a minute of nothing on a library this size. $batch is the
+ * same twenty requests in one, so a level of the tree costs one wait instead of
+ * twenty.
+ *
+ * Each spot is { driveId, itemId, next } -- `next` being a continuation from an
+ * earlier page, which has to be made relative again because a batch carries
+ * paths rather than URLs. The answers come back in the order they were asked
+ * for, one per spot, and a spot that failed says so rather than throwing: one
+ * folder Graph will not open should cost that folder, not the other nineteen.
+ */
+export const BATCH = 20;
+
+export async function listChildrenBatch(spots) {
+  const token = await accessToken();
+  const slice = spots.slice(0, BATCH);
+  const res = await fetch(`${BASE}/$batch`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      requests: slice.map((spot, index) => ({
+        id: String(index),
+        method: 'GET',
+        url: spot.next
+          ? (spot.next.startsWith(BASE) ? spot.next.slice(BASE.length) : spot.next)
+          : childrenUrl(spot.driveId, spot.itemId, `?$select=${SELECT}&$top=${PAGE}`),
+      })),
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error((body.error && body.error.message) || `Graph ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+
+  const body = await res.json();
+  const out = slice.map(() => ({ failed: 'no answer' }));
+  for (const response of body.responses || []) {
+    const at = Number(response.id);
+    if (!Number.isInteger(at) || !slice[at]) continue;
+    const page = response.body || {};
+    if (response.status !== 200) {
+      out[at] = {
+        failed: (page.error && page.error.message) || `Graph ${response.status}`,
+        status: response.status,
+      };
+      continue;
+    }
+    const entries = (page.value || []).map(normalise);
+    out[at] = {
+      videos: entries.filter((e) => e.video),
+      folders: entries.filter((e) => e.isFolder),
+      next: page['@odata.nextLink'] || null,
+    };
+  }
+  return out;
+}
+
+/**
  * Thumbnail URLs for up to 20 items in a single round trip, via Graph's $batch
  * endpoint. The URLs it returns are pre-signed, so an <img> loads them with no
  * Authorization header — which is why this is a JSON call rather than fetching
