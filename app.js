@@ -1316,30 +1316,36 @@ function vocabularyByName(field) {
     a.tag.localeCompare(b.tag, undefined, { numeric: true, sensitivity: 'base' }));
 }
 
-function matchesAdv(video) {
+/**
+ * Does this video match that filter?
+ *
+ * Takes the filter rather than reading the one in force, because shuffle keeps
+ * a second one of the same shape: its tags and rating are its own, and the
+ * panel on the grid has no business deciding what it hands you.
+ */
+function matchesFilter(video, f) {
   const record = recordFor(video);
 
-  if (adv.ratings.size) {
+  if (f.ratings.size) {
     const rating = record.rating || 0;
-    const wanted = picked(adv.ratings, 'in');
-    const barred = picked(adv.ratings, 'out');
+    const wanted = picked(f.ratings, 'in');
+    const barred = picked(f.ratings, 'out');
     if (wanted.length && !wanted.includes(rating)) return false;
     if (barred.includes(rating)) return false;
   }
 
-
   for (const field of ['tags', 'models']) {
-    if (!adv[field].size) continue;
+    if (!f[field] || !f[field].size) continue;
     const have = new Set(valuesOf(record, field).map((t) => String(t).toLowerCase()));
 
     // "Has none at all" is its own question, asked before any value is compared.
-    const nothing = adv[field].get(NOTHING);
+    const nothing = f[field].get(NOTHING);
     if (nothing === 'in' && have.size) return false;
     if (nothing === 'out' && !have.size) return false;
 
-    const wanted = picked(adv[field], 'in').map((t) => t.toLowerCase());
-    const barred = picked(adv[field], 'out').map((t) => t.toLowerCase());
-    const mode = adv.mode[field] || 'all';
+    const wanted = picked(f[field], 'in').map((t) => t.toLowerCase());
+    const barred = picked(f[field], 'out').map((t) => t.toLowerCase());
+    const mode = (f.mode || {})[field] || 'all';
     if (wanted.length) {
       const hit = mode === 'any'
         ? wanted.some((t) => have.has(t))
@@ -1352,6 +1358,10 @@ function matchesAdv(video) {
   // Folder selection is handled by loading those folders' videos, not by
   // filtering — there is nothing to filter until they have been fetched.
   return true;
+}
+
+function matchesAdv(video) {
+  return matchesFilter(video, adv);
 }
 
 function openAdv() {
@@ -1462,6 +1472,207 @@ function resetAdv() {
   advDraft = newAdvFilter();
   renderAdv();
   applyAdv();
+}
+
+// ------------------------------------------------------------------ shuffle
+//
+// The other way into the library, and the same one the desktop grew. The grid
+// is for finding a particular video; this is for the evenings when the answer
+// is "something, anything, from in here", so it skips the grid and opens the
+// player on a video nobody chose.
+//
+// Three things it deliberately does NOT share with the filter beside it. Its
+// tags and rating are its own, because the panel on the grid is where you left
+// the grid and has no business deciding what you are shown tonight. It never
+// writes to that filter or to the listing, so closing the player puts you back
+// exactly where you were. And it always covers the whole tree below the folder
+// you are standing in, flattened, whether or not the ⇊ button is lit -- being
+// told there is nothing to shuffle while standing in a folder of folders would
+// be a silly answer to a fair question.
+
+const shuffle = {
+  on: false,
+  pool: [],
+  filter: null,
+  draft: null,
+  // What has been played this run, newest last, so Back walks it and a video
+  // does not come round again until the pool has been through.
+  seen: [],
+  at: -1,
+  // Bumped on every start, so a walk whose sheet was closed and reopened
+  // cannot pour its results into the run that replaced it.
+  run: 0,
+};
+
+function openShuffle() {
+  shuffle.draft = newAdvFilter();
+  if (shuffle.filter) {
+    shuffle.draft.mode = { ...shuffle.filter.mode };
+    for (const facet of ['tags', 'ratings']) {
+      shuffle.draft[facet] = new Map(shuffle.filter[facet]);
+    }
+  }
+  const here = state.stack.length ? state.stack[state.stack.length - 1].name : '';
+  $('#shuffleWhere').textContent = here
+    ? `Anything in ${here} and every folder under it.`
+    : 'Anything in here and every folder under it.';
+  $('#shuffle').hidden = false;
+  renderShuffle();
+}
+
+function renderShuffle() {
+  const ratings = $('#shuffleRating');
+  ratings.innerHTML = '';
+  for (const value of [0, 1, 2, 3, 4, 5]) {
+    ratings.appendChild(advChip(
+      value === 0 ? 'unrated' : '★'.repeat(value),
+      shuffle.draft.ratings.get(value),
+      () => { cycleIn(shuffle.draft.ratings, value); renderShuffle(); },
+    ));
+  }
+
+  const host = $('#shuffleTags');
+  host.innerHTML = '';
+  const gap = advChip('no tags', shuffle.draft.tags.get(NOTHING), () => {
+    cycleIn(shuffle.draft.tags, NOTHING);
+    renderShuffle();
+  });
+  gap.classList.add('none');
+  host.appendChild(gap);
+  const vocab = vocabularyByName('tags');
+  if (!vocab.length) host.insertAdjacentHTML('beforeend', '<span class="dim">nothing yet</span>');
+  for (const entry of vocab) {
+    host.appendChild(advChip(`${entry.tag} · ${entry.count}`, shuffle.draft.tags.get(entry.tag),
+      () => { cycleIn(shuffle.draft.tags, entry.tag); renderShuffle(); }));
+  }
+
+  $('#shuffleTagMode').textContent = shuffle.draft.mode.tags;
+
+  const bits = [];
+  for (const [facet, one, many] of [['tags', 'tag', 'tags'], ['ratings', 'rating', 'ratings']]) {
+    const inn = picked(shuffle.draft[facet], 'in').length;
+    const out = picked(shuffle.draft[facet], 'out').length;
+    if (inn) bits.push(`${inn} ${inn === 1 ? one : many}`);
+    if (out) bits.push(`without ${out} ${out === 1 ? one : many}`);
+    const nothing = shuffle.draft[facet].get(NOTHING);
+    if (nothing === 'in') bits.push(`no ${many} at all`);
+    if (nothing === 'out') bits.push(`some ${many}`);
+  }
+  $('#shuffleSummary').textContent = bits.join(' · ') || 'everything';
+}
+
+/**
+ * Every video below the folder in hand.
+ *
+ * The listing already knows them when it is flattened and has finished
+ * streaming, and re-walking thousands of items over the network to learn what
+ * is already in memory would be minutes of waiting for nothing. Otherwise this
+ * does its own walk -- the same breadth-first pass loadMore makes, into a
+ * private array rather than the grid, so the listing behind the player is
+ * untouched when you come back to it.
+ */
+async function shufflePool(run, onCount) {
+  if (state.flatten && !moreToLoad() && !state.loading) {
+    return state.videos.filter((v) => !v.isFolder);
+  }
+  const { driveId, itemId } = state.source || {};
+  const found = [];
+  let here = { driveId, itemId, next: null };
+  const queue = [];
+  while (here) {
+    const page = await graph.listChildren(here.driveId, here.itemId, here.next);
+    if (shuffle.run !== run) return [];    // the sheet was closed, or restarted
+    found.push(...page.videos);
+    queue.push(...page.folders.map((f) => ({ driveId: f.driveId, itemId: f.id, next: null })));
+    onCount(found.length);
+    here = page.next ? { ...here, next: page.next } : (queue.shift() || null);
+  }
+  return found;
+}
+
+async function startShuffle() {
+  shuffle.filter = shuffle.draft;
+  const run = shuffle.run + 1;
+  shuffle.run = run;
+
+  const start = $('#shuffleStart');
+  start.disabled = true;
+  $('#shuffleSummary').textContent = 'Looking…';
+  try {
+    const all = await shufflePool(run, (n) => {
+      if (shuffle.run === run) $('#shuffleSummary').textContent = `Looking… ${n} so far`;
+    });
+    if (shuffle.run !== run) return;
+    shuffle.pool = all.filter((v) => matchesFilter(v, shuffle.filter));
+    shuffle.seen = [];
+    shuffle.at = -1;
+    if (!shuffle.pool.length) {
+      $('#shuffleSummary').textContent = all.length
+        ? `Nothing here matches — ${all.length} videos, none of them`
+        : 'No videos under this folder';
+      return;
+    }
+    shuffle.on = true;
+    $('#shuffle').hidden = true;
+    syncShuffleBadge();
+    shuffleStep(1);
+  } catch (err) {
+    $('#shuffleSummary').textContent = '';
+    toast(err.message, 'err');
+  } finally {
+    start.disabled = false;
+  }
+}
+
+/**
+ * The next video, or the one before it.
+ *
+ * Forward draws one that has not come up yet, so a run of twenty is twenty
+ * different videos rather than a coin toss twenty times; once the pool is spent
+ * it starts a fresh pass. Back walks what has already been shown, because
+ * "wait, go back" is the one thing you always want from a shuffle and
+ * re-randomising would make it impossible.
+ */
+function shuffleStep(step) {
+  if (!shuffle.pool.length) return;
+  if (step < 0) {
+    if (shuffle.at <= 0) return;
+    shuffle.at -= 1;
+    goToVideo(shuffle.seen[shuffle.at], step);
+    return;
+  }
+  if (shuffle.at + 1 < shuffle.seen.length) {
+    shuffle.at += 1;
+    goToVideo(shuffle.seen[shuffle.at], step);
+    return;
+  }
+  const shown = new Set(shuffle.seen.map((v) => v.id));
+  let fresh = shuffle.pool.filter((v) => !shown.has(v.id));
+  // Everything has had a turn: start again, but never with the one on screen.
+  if (!fresh.length) {
+    fresh = shuffle.pool.filter((v) => v.id !== state.playingId);
+    if (!fresh.length) fresh = shuffle.pool.slice();
+    shuffle.seen = [];
+    shuffle.at = -1;
+  }
+  const pick = fresh[Math.floor(Math.random() * fresh.length)];
+  shuffle.seen.push(pick);
+  shuffle.at = shuffle.seen.length - 1;
+  goToVideo(pick, step);
+}
+
+/** Leaving the player leaves the shuffle. The listing was never touched. */
+function stopShuffle() {
+  shuffle.on = false;
+  shuffle.pool = [];
+  shuffle.seen = [];
+  shuffle.at = -1;
+  shuffle.run += 1;   // abandon any walk still running
+  syncShuffleBadge();
+}
+
+function syncShuffleBadge() {
+  $('#shuffleBtn').classList.toggle('on', shuffle.on);
 }
 
 /**
@@ -2565,6 +2776,9 @@ async function goToVideo(video, step) {
 }
 
 function playSibling(step) {
+  // Shuffling, the arrows and the swipe mean something else entirely: there is
+  // no listing to be next in, only a pool to draw from.
+  if (shuffle.on) { shuffleStep(step); return; }
   const list = playerList();
   if (list.length < 2 || !state.playingId) return;
   const at = list.findIndex((v) => v.id === state.playingId);
@@ -2574,6 +2788,17 @@ function playSibling(step) {
 
 /** Hides the arrows when there is nowhere to go, and says where you are. */
 function syncPlayerNav() {
+  // A shuffle has no position in a listing to report: it has a pool, how far
+  // into it this run has got, and a back arrow only once there is something
+  // behind you.
+  if (shuffle.on) {
+    $('#playerPrev').hidden = shuffle.at <= 0;
+    $('#playerNext').hidden = shuffle.pool.length < 2;
+    const pos = $('#playerPos');
+    pos.hidden = false;
+    pos.textContent = `🔀 ${shuffle.at + 1} of ${shuffle.pool.length}`;
+    return;
+  }
   const list = playerList();
   const at = list.findIndex((v) => v.id === state.playingId);
   const usable = list.length > 1 && at >= 0;
@@ -2618,6 +2843,10 @@ function closePlayer() {
   el.load();
   $('#player').hidden = true;
   state.playingId = null;
+  // Closing the player is how a shuffle ends. The listing underneath is the one
+  // that was there before it started -- nothing about it was changed to get
+  // here, so there is nothing to put back.
+  if (shuffle.on) stopShuffle();
 
   if (playerReturn === null) return;
   const back = playerReturn;
@@ -2683,6 +2912,23 @@ async function boot() {
       renderAdv();
     });
   }
+
+  $('#shuffleBtn').addEventListener('click', openShuffle);
+  // Closing the sheet abandons any walk it started, so a folder of thousands
+  // does not go on fetching pages for a shuffle nobody is waiting for.
+  $('#shuffleClose').addEventListener('click', () => {
+    shuffle.run += 1;
+    $('#shuffle').hidden = true;
+  });
+  $('#shuffleStart').addEventListener('click', startShuffle);
+  $('#shuffleReset').addEventListener('click', () => {
+    shuffle.draft = newAdvFilter();
+    renderShuffle();
+  });
+  $('#shuffleTagMode').addEventListener('click', () => {
+    shuffle.draft.mode.tags = shuffle.draft.mode.tags === 'all' ? 'any' : 'all';
+    renderShuffle();
+  });
   $('#labelsClose').addEventListener('click', () => { $('#labels').hidden = true; });
   $('#labelsAdd').addEventListener('click', () => commitLabels('add'));
   $('#labelsReplace').addEventListener('click', () => commitLabels('replace'));

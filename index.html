@@ -25,6 +25,20 @@
     <div class="tools">
       <input id="search" type="search" class="search" placeholder="name or #tag" autocomplete="off">
       <button id="flatBtn" class="btn icon" title="Flatten subfolders — every video below here">⇊</button>
+      <!-- Left of the filter, because it is the other way into the library:
+           the filter narrows what you are looking at, this stops you looking. -->
+      <button id="shuffleBtn" class="btn icon" title="Shuffle — a random video from here down"
+              aria-label="Shuffle">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"
+             fill="none" stroke="currentColor" stroke-width="1.4"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M1.5 4h2.2c1 0 1.6.5 2.2 1.3l4 5.4c.6.8 1.2 1.3 2.2 1.3h2.4"/>
+          <path d="M1.5 12h2.2c1 0 1.6-.5 2.2-1.3l.9-1.2"/>
+          <path d="M9 6.5l1-1.2C10.6 4.5 11.2 4 12.2 4h2.3"/>
+          <path d="M12.7 2.3L14.9 4l-2.2 1.7"/>
+          <path d="M12.7 10.3l2.2 1.7-2.2 1.7"/>
+        </svg>
+      </button>
       <button id="advBtn" class="btn icon" title="Advanced filters">
         <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
           <path d="M1.5 2.5h13L9.5 8.6v4.2l-3 1.7V8.6z" fill="none" stroke="currentColor"
@@ -91,6 +105,34 @@
     <footer class="picker-foot">
       <span id="advSummary" class="dim"></span>
       <button id="advApply" class="btn primary">Apply</button>
+    </footer>
+  </div>
+</div>
+
+<!-- Shuffle: the only two questions worth asking before handing over the
+     evening. Deliberately not the advanced filter -- that one belongs to the
+     grid, and shuffling must neither read it nor disturb it. -->
+<div id="shuffle" class="picker" hidden>
+  <div class="picker-card">
+    <header class="picker-head">
+      <span>Shuffle</span>
+      <button id="shuffleReset" class="btn ghost">Clear</button>
+      <button id="shuffleClose" class="btn ghost">✕</button>
+    </header>
+
+    <div class="adv-body">
+      <p class="adv-how" id="shuffleWhere"></p>
+
+      <div class="adv-label">Tags <button id="shuffleTagMode" class="mode">all</button></div>
+      <div id="shuffleTags" class="chip-row"></div>
+
+      <div class="adv-label">Rating</div>
+      <div id="shuffleRating" class="chip-row"></div>
+    </div>
+
+    <footer class="picker-foot">
+      <span id="shuffleSummary" class="dim"></span>
+      <button id="shuffleStart" class="btn primary">Shuffle</button>
     </footer>
   </div>
 </div>
