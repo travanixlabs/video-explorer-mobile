@@ -1266,103 +1266,14 @@ function newAdvFilter() {
   return {
     tags: new Map(),
     models: new Map(),
-    studio: new Map(),
-    production: new Map(),
     ratings: new Map(),
     // Per facet: "all of these tags" and "any of these performers" is a
     // reasonable pair to ask for. Exclusions are always all-of, since "not
-    // this" means not this either way. The studio has none — one studio per
-    // video makes all-of empty by construction.
+    // this" means not this either way.
     mode: { tags: 'all', models: 'all' },
-    // One question, several answers, each independently included or excluded --
-    // the same shape as the label facets above, and the same as the desktop.
-    favourite: new Map(),       // yes | no
-    suggested: new Map(),       // match | nomatch | faceless | unprofiled
-    suggestedCount: new Map(),  // one | many
-    suggestedAct: new Map(),    // accepted | rejected | pending
   };
 }
 
-/**
- * The one-question facets, each answer a predicate. Mirrors the desktop.
- *
- * Predicates rather than "derive this video's one value", because the last row
- * is not exclusive: a video can hold a name you took and another you have not,
- * and both are true of it at once.
- */
-const CHOICES = {
-  favourite: {
-    yes: (v) => (recordFor(v).models || []).some((m) => isFavouriteModel(m)),
-    no: (v) => !(recordFor(v).models || []).some((m) => isFavouriteModel(m)),
-  },
-  suggested: {
-    match: (v) => suggestionMatch(v, 'match'),
-    nomatch: (v) => suggestionMatch(v, 'nomatch'),
-    faceless: (v) => suggestionMatch(v, 'faceless'),
-    unprofiled: (v) => suggestionMatch(v, 'unprofiled'),
-  },
-  suggestedCount: {
-    one: (v) => facesFor(v).suggested.length === 1,
-    many: (v) => facesFor(v).suggested.length > 1,
-  },
-  suggestedAct: {
-    accepted: (v) => {
-      const named = new Set((recordFor(v).models || []).map((m) => m.toLowerCase()));
-      return facesFor(v).suggested.some((s) => named.has(String(s.name).toLowerCase()));
-    },
-    rejected: (v) => (recordFor(v).notModels || []).length > 0,
-    // Needs a suggestion to be pending: a video with nothing offered is not
-    // awaiting a decision, it is empty.
-    pending: (v) => {
-      const named = new Set((recordFor(v).models || []).map((m) => m.toLowerCase()));
-      return facesFor(v).suggested.some((s) => !named.has(String(s.name).toLowerCase()));
-    },
-  },
-};
-
-const CHOICE_FACETS = Object.keys(CHOICES);
-
-/** Which row draws which facet, and what each answer is called. */
-const CHOICE_ROWS = [
-  ['#advFav', 'favourite', [
-    ['yes', 'a favourite is in it'],
-    ['no', 'nobody marked'],
-  ]],
-  ['#advSuggested', 'suggested', [
-    ['match', 'profiled, all suggestions credited'],
-    ['nomatch', 'profiled, someone not credited'],
-    ['faceless', 'no usable face'],
-    ['unprofiled', 'not profiled'],
-  ]],
-  ['#advSuggestedCount', 'suggestedCount', [
-    ['one', 'one model suggested'],
-    ['many', 'multiple models suggested'],
-  ]],
-  ['#advSuggestedAct', 'suggestedAct', [
-    ['accepted', 'accepted (incl. already matched)'],
-    ['rejected', 'rejected'],
-    ['pending', 'pending'],
-  ]],
-];
-
-/**
- * Included if it matches any included answer, excluded if it matches an
- * excluded one. Exclusion wins, the way it does for tags.
- */
-function choiceMatch(map, facet, video) {
-  if (!map || !map.size) return true;
-  const tests = CHOICES[facet];
-  let wanted = false;
-  let hit = false;
-  for (const [value, mode] of map) {
-    const test = tests[value];
-    if (!test) continue;
-    const is = test(video);
-    if (mode === 'out' && is) return false;
-    if (mode === 'in') { wanted = true; if (is) hit = true; }
-  }
-  return !wanted || hit;
-}
 
 /**
  * The "no tags" / "no models" chip lives in the same map as the values, under a
@@ -1370,14 +1281,13 @@ function choiceMatch(map, facet, video) {
  */
 const NOTHING = '\u0000';
 
-const FACETS = ['tags', 'models', 'studio', 'production', 'ratings'];
+const FACETS = ['tags', 'models', 'ratings'];
 
 let adv = newAdvFilter();
 let advDraft = newAdvFilter();
 
 function advActive(f = adv) {
-  return CHOICE_FACETS.some((name) => f[name].size > 0)
-    || FACETS.some((name) => f[name].size > 0);
+  return FACETS.some((name) => f[name].size > 0);
 }
 
 /** The values a facet requires, or excludes. The emptiness chip is not a value. */
@@ -1418,11 +1328,7 @@ function matchesAdv(video) {
   }
 
 
-  for (const facet of CHOICE_FACETS) {
-    if (!choiceMatch(adv[facet], facet, video)) return false;
-  }
-
-  for (const field of ['tags', 'models', 'studio', 'production']) {
+  for (const field of ['tags', 'models']) {
     if (!adv[field].size) continue;
     const have = new Set(valuesOf(record, field).map((t) => String(t).toLowerCase()));
 
@@ -1471,13 +1377,11 @@ function renderAdv() {
     ));
   }
 
-  // No studio green or model gold in here: this panel paints green for
-  // "required" and red for "excluded", so an unselected studio chip in its own
-  // colour reads as one that has been chosen. The label colours belong on a
-  // card, where nothing else is coloured.
+  // No model gold in here: this panel paints green for "required" and red for
+  // "excluded", so an unselected chip in its own colour reads as one that has
+  // been chosen. The label colours belong on a card, where nothing else is
+  // coloured.
   for (const [field, box, none] of [
-    ['studio', '#advStudio', 'no studio'],
-    ['production', '#advProduction', 'no production'],
     ['models', '#advModels', 'no models'],
     ['tags', '#advTags', 'no tags'],
   ]) {
@@ -1504,24 +1408,6 @@ function renderAdv() {
     }
   }
 
-  // Only offered once the desktop has actually profiled something: on a library
-  // where the feature has never run, every answer here would be the same one.
-  $('#advSuggestedRow').hidden = !state.faces;
-
-  // Every one of these cycles include -> exclude -> off, the same as the label
-  // rows above and the same as the desktop. They were one-of-N pickers with an
-  // "everything" chip, which could not say "anything except not profiled".
-  for (const [host, facet, options] of CHOICE_ROWS) {
-    const row = $(host);
-    if (!row) continue;
-    row.innerHTML = '';
-    for (const [value, label] of options) {
-      row.appendChild(advChip(label, advDraft[facet].get(value), () => {
-        cycleIn(advDraft[facet], value);
-        renderAdv();
-      }));
-    }
-  }
 
   $('#advTagMode').textContent = advDraft.mode.tags;
   $('#advModelMode').textContent = advDraft.mode.models;
@@ -1536,20 +1422,9 @@ function renderAdv() {
     if (nothing === 'in') bits.push(`no ${many} at all`);
     if (nothing === 'out') bits.push(`some ${many}`);
   };
-  say('studio', 'studio', 'studios');
-  say('production', 'production', 'productions');
   say('models', 'model');
   say('tags', 'tag');
   say('ratings', 'rating');
-  // From the same table the chips are drawn from, so a new answer appears in
-  // the summary without being listed here as well.
-  for (const [, facet, options] of CHOICE_ROWS) {
-    for (const [value, label] of options) {
-      const mode = advDraft[facet].get(value);
-      if (mode === 'in') bits.push(label);
-      if (mode === 'out') bits.push(`not ${label}`);
-    }
-  }
   $('#advSummary').textContent = bits.join(' · ') || 'no filters';
 }
 
