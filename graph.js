@@ -72,6 +72,8 @@ function normalise(item) {
   return {
     id: source.id,
     driveId: ref.driveId || null,
+    // Where it lives, so a move can be moved back.
+    parentId: ref.id || null,
     name: item.name,
     isFolder: Boolean(source.folder),
     childCount: source.folder ? source.folder.childCount : 0,
@@ -283,9 +285,30 @@ export async function thumbnailsFor(items) {
  * These expire in about an hour, so they are fetched on demand rather than
  * cached with the listing.
  */
+/**
+ * Stream URLs, remembered and prefetchable. Opening a video used to pay a
+ * Graph round trip -- most of a second of black stage -- every single time;
+ * the URL it fetches is good for about an hour, so the next video's can be
+ * resolved while this one is still playing and a swipe lands instantly.
+ * Forty-five minutes, matching the desktop's cache of the same URLs.
+ */
+const STREAM_TTL_MS = 45 * 60 * 1000;
+const streams = new Map(); // itemId -> { url, at }
+
 export async function streamUrl(driveId, itemId) {
+  const hit = streams.get(itemId);
+  if (hit && Date.now() - hit.at < STREAM_TTL_MS) return hit.url;
   const item = await call(itemBase(driveId, itemId));
-  return item['@microsoft.graph.downloadUrl'] || null;
+  const url = item['@microsoft.graph.downloadUrl'] || null;
+  if (url) streams.set(itemId, { url, at: Date.now() });
+  return url;
+}
+
+/** The same lookup, paid while nobody is waiting. Failures cost nothing. */
+export function warmStream(driveId, itemId) {
+  const hit = streams.get(itemId);
+  if (hit && Date.now() - hit.at < STREAM_TTL_MS) return;
+  streamUrl(driveId, itemId).catch(() => {});
 }
 
 /**
@@ -319,6 +342,65 @@ export async function itemById(driveId, itemId) {
   return normalise(await call(`${itemBase(driveId, itemId)}?$expand=thumbnails`));
 }
 
+// ----------------------------------------------------------- a small kv store
+//
+// IndexedDB behind two functions, for the things worth keeping between opens:
+// the labels file and the shuffle's walks. localStorage is the wrong tool at
+// these sizes -- the labels alone are 4MB -- and a cache that can throw on a
+// private tab must never take the app down, so every path here swallows its
+// own failures and answers null.
+
+const DB = 'video-explorer';
+const KV = 'kv';
+
+function idb() {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open(DB, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(KV);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+export async function kvGet(key) {
+  const db = await idb();
+  if (!db) return null;
+  return new Promise((resolve) => {
+    try {
+      const req = db.transaction(KV).objectStore(KV).get(key);
+      req.onsuccess = () => resolve(req.result === undefined ? null : req.result);
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+export async function kvSet(key, value) {
+  const db = await idb();
+  if (!db) return false;
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(KV, 'readwrite');
+      tx.objectStore(KV).put(value, key);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+export async function kvDel(key) {
+  const db = await idb();
+  if (!db) return;
+  try { db.transaction(KV, 'readwrite').objectStore(KV).delete(key); } catch { /* gone is gone */ }
+}
+
 // ------------------------------------------------------------ ratings + tags
 
 const LIBRARY_PATH = '/me/drive/root:/.video-explorer/library.json';
@@ -335,7 +417,32 @@ const LIBRARY_PATH = '/me/drive/root:/.video-explorer/library.json';
  * nothing there yet. Everything else throws, and the caller declines to write
  * until a real load succeeds.
  */
+/**
+ * ...and no longer 4MB over mobile data on every open. The file's cTag -- the
+ * tag Graph changes exactly when the CONTENT changes -- costs a few hundred
+ * bytes to ask for; when it matches what IndexedDB holds, the held copy IS the
+ * current file and is served as such, writes and all. Only a changed tag pays
+ * for the download. Every save stores the tag Graph hands back with the PUT,
+ * so a phone that did the writing matches on its next open too.
+ */
 export async function loadLibrary() {
+  let meta;
+  try {
+    meta = await call(`${LIBRARY_PATH}?$select=cTag,size`);
+  } catch (err) {
+    if (err.status === 404) {
+      kvDel('library');
+      return { version: 1, records: {} };
+    }
+    throw new Error(`Could not read your labels (${err.status || err.message})`);
+  }
+  const tag = meta.cTag || '';
+
+  const held = await kvGet('library');
+  if (held && tag && held.tag === tag && held.body && held.body.records) {
+    return held.body;
+  }
+
   const token = await accessToken();
   const res = await fetch(`${BASE}${LIBRARY_PATH}:/content`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -346,6 +453,7 @@ export async function loadLibrary() {
   if (!body || typeof body !== 'object' || !body.records || typeof body.records !== 'object') {
     throw new Error('The labels file on OneDrive is not in a shape this understands');
   }
+  if (tag) await kvSet('library', { tag, body });
   return body;
 }
 
@@ -373,6 +481,12 @@ export async function saveLibrary(library) {
   });
   if (!res.ok) throw new Error(`Could not save ratings (${res.status})`);
   loadedCount = count;
+  // The PUT answers with the item as it now stands, tag included -- kept, so
+  // the next open matches its own write and skips the download.
+  try {
+    const item = await res.json();
+    if (item && item.cTag) await kvSet('library', { tag: item.cTag, body: library });
+  } catch { /* an unreadable reply just means one extra download next open */ }
 }
 
 const VE_PATH = '/me/drive/root:/.video-explorer';

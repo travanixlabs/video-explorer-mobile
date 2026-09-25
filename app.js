@@ -51,9 +51,30 @@ const wanted = new Map(); // item id -> the .shot element waiting for a URL
 const thumbCache = new Map(); // item id -> url
 let thumbTimer = null;
 
+/**
+ * What is on screen goes first. The queue is in card order, which is the right
+ * order to work through a folder in but the wrong one to answer a scroll with:
+ * a flattened five thousand is two hundred and fifty batches, and a tile deep
+ * in the listing would wait out most of them blank. On screen, or 400px from
+ * it, a tile jumps the queue -- everything else still arrives, just after.
+ */
+const urgent = new Set(); // item ids currently near the screen
+const eye = typeof IntersectionObserver === 'function'
+  ? new IntersectionObserver((entries) => {
+    let poke = false;
+    for (const entry of entries) {
+      const id = entry.target.dataset.id;
+      if (!entry.isIntersecting) { urgent.delete(id); continue; }
+      if (wanted.has(id)) { urgent.add(id); poke = true; }
+    }
+    if (poke) flushThumbs();
+  }, { rootMargin: '400px 0px' })
+  : null;
+
 /** Asks for one card's thumbnail. The wait coalesces a render into one batch. */
 function wantThumb(el) {
   wanted.set(el.dataset.id, el);
+  if (eye) eye.observe(el);
   clearTimeout(thumbTimer);
   thumbTimer = setTimeout(flushThumbs, 120);
 }
@@ -75,14 +96,21 @@ async function flushThumbs() {
 
 async function flushBatch() {
   const batch = [];
-  for (const [id, el] of wanted) {
-    wanted.delete(id);
-    // Its card was thrown away by a re-render before its turn came. The rebuilt
-    // one asks again, so dropping it here costs nothing and saves a request.
-    if (!el.isConnected) continue;
-    batch.push([id, el]);
-    if (batch.length === 20) break;
-  }
+  const take = (onlyUrgent) => {
+    for (const [id, el] of wanted) {
+      if (batch.length === 20) return;
+      if (onlyUrgent && !urgent.has(id)) continue;
+      wanted.delete(id);
+      urgent.delete(id);
+      if (eye) eye.unobserve(el);
+      // Its card was thrown away by a re-render before its turn came. The
+      // rebuilt one asks again, so dropping it costs nothing, saves a request.
+      if (!el.isConnected) continue;
+      batch.push([id, el]);
+    }
+  };
+  take(true);   // whatever is near the screen
+  take(false);  // then the folder in its own order
   if (!batch.length) return;
 
   const items = batch.map(([id, el]) => ({ id, driveId: el.dataset.drive }));
@@ -108,12 +136,20 @@ function fmtBytes(bytes) {
   return `${n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
 }
 
-function toast(message, kind = '') {
+function toast(message, kind = '', action = null) {
   const el = document.createElement('div');
   el.className = 'toast ' + kind;
   el.textContent = message;
+  // A toast with an action stays up long enough to press it.
+  if (action) {
+    const btn = document.createElement('button');
+    btn.className = 'toast-act';
+    btn.textContent = action.label;
+    btn.addEventListener('click', () => { el.remove(); action.run(); });
+    el.appendChild(btn);
+  }
   $('#toasts').appendChild(el);
-  setTimeout(() => el.remove(), 3200);
+  setTimeout(() => el.remove(), action ? 8000 : 3200);
 }
 
 function setBusy(text) {
@@ -527,29 +563,47 @@ async function loadMore() {
   try {
     do {
       if (state.flatten && !state.walk) return; // the walk finished
-      const page = state.flatten
-        ? await graph.listChildren(state.walk.driveId, state.walk.itemId, state.walk.next)
-        : await graph.listPage(driveId, itemId, state.next);
-      // A folder tapped while this one was still streaming wins; anything this
-      // loop produces from here belongs to a screen the user has left.
-      if (state.load !== run) return;
-
-      state.videos.push(...page.videos);
       if (state.flatten) {
-        // Breadth-first: finish the folder in hand, then take the next off the
-        // queue. Subfolders join the queue as they are seen, which is why the
-        // walk needs no extra request per folder.
-        for (const video of page.videos) video.folderName = state.walk.name || '';
-        state.queue.push(...page.folders.map((f) => ({
-          // Without a drive of its own a subfolder is in the one holding it;
-          // passing the gap on asks Graph for /drives/null/items/… .
-          driveId: f.driveId || state.walk.driveId, itemId: f.id, name: f.name,
-        })));
-        state.walk = page.next
-          ? { ...state.walk, next: page.next }
-          : (state.queue.shift() || null);
+        // A level at a time, twenty folders per round trip -- the same $batch
+        // walk the shuffle uses, for the same reason: one folder per round trip
+        // was the measured minute on a library folder of five thousand.
+        const round = [state.walk];
+        while (round.length < graph.BATCH && state.queue.length) {
+          const spot = state.queue.shift();
+          if (!('next' in spot)) spot.next = null;
+          round.push(spot);
+        }
+        const pages = await graph.listChildrenBatch(round);
+        // A folder tapped while this one was still streaming wins; anything
+        // this loop produces from here belongs to a screen the user has left.
+        if (state.load !== run) return;
+
+        const going = []; // folders with pages still to fetch, kept at the front
+        pages.forEach((page, i) => {
+          const spot = round[i];
+          if (page.failed) {
+            // Once more before giving up on it -- a 429 is a bad moment rather
+            // than a bad folder -- then that folder alone is the cost.
+            if (!spot.tried) state.queue.push({ ...spot, tried: true });
+            return;
+          }
+          for (const video of page.videos) video.folderName = spot.name || '';
+          state.videos.push(...page.videos);
+          if (page.next) going.push({ ...spot, next: page.next });
+          state.queue.push(...page.folders.map((f) => ({
+            // Without a drive of its own a subfolder is in the one holding it;
+            // passing the gap on asks Graph for /drives/null/items/… .
+            driveId: f.driveId || spot.driveId, itemId: f.id, name: f.name, next: null,
+          })));
+        });
+        // Breadth-first still: half-read folders finish before new ones start.
+        state.queue.unshift(...going);
+        state.walk = state.queue.shift() || null;
         if (state.walk && !('next' in state.walk)) state.walk.next = null;
       } else {
+        const page = await graph.listPage(driveId, itemId, state.next);
+        if (state.load !== run) return;
+        state.videos.push(...page.videos);
         state.next = page.next;
       }
       renderSoon();
@@ -1508,6 +1562,9 @@ const shuffle = {
   // Whether the tree is still arriving. The pool is playable long before the
   // walk finishes, and the readout says so rather than pretending to be final.
   walking: false,
+  // The pick the NEXT forward press will play, drawn as soon as this one is on
+  // screen -- so its stream URL can be fetched while nobody is waiting.
+  ahead: null,
   // Bumped on every start, so a walk whose sheet was closed and reopened
   // cannot pour its results into the run that replaced it.
   run: 0,
@@ -1646,19 +1703,22 @@ function renderShuffle() {
  * Everything lands in a private array either way, so the listing behind the
  * player is untouched when you come back to it.
  */
-async function shufflePool(run, onPage, skipped = []) {
-  const roots = shuffleDirs(shuffle.dirs);
-  // The listing already knows the answer only when it is the whole tree AND the
-  // tree asked for is the one on screen.
-  if (!roots.length && state.flatten && !moreToLoad() && !state.loading) {
-    onPage(state.videos.filter((v) => !v.isFolder));
-    return;
-  }
-  const { driveId, itemId } = state.source || {};
-  const queue = roots.length
-    ? roots.map((f) => ({ driveId: f.driveId, itemId: f.id, name: f.name, next: null }))
-    : [{ driveId, itemId, name: '', next: null }];
-  let found = 0;
+/**
+ * Walks whole trees, a level per round trip, handing videos over as they land.
+ *
+ * `spots` are the starting folders; every video found is attributed to the
+ * spot whose tree it was found in, so a finished walk can be remembered per
+ * folder. `going` is asked between rounds -- false abandons the walk with
+ * nothing stored.
+ *
+ * A folder Graph refuses is tried once more -- a 429 is a bad moment rather
+ * than a bad folder ("ObjectHandle is Invalid" is the other kind) -- and then
+ * skipped by name. With nothing found anywhere, the refusal is the answer.
+ */
+async function walkTrees(spots, going, onPage, skipped = []) {
+  const found = spots.map(() => []);
+  const queue = spots.map((spot, home) => ({ ...spot, next: null, home }));
+  let served = 0;
   let refused = '';
 
   while (queue.length) {
@@ -1669,41 +1729,93 @@ async function shufflePool(run, onPage, skipped = []) {
     } catch (err) {
       // Nothing to show for it: the error is the answer. Otherwise the pool is
       // what it is -- better a shuffle over most of the tree than none.
-      if (!found) throw err;
+      if (!served) throw err;
       skipped.push(...round.map((spot) => spot.name || 'a folder'));
-      return;
+      return null;
     }
-    if (shuffle.run !== run) return;     // the sheet was closed, or restarted
+    if (!going()) return null;           // the sheet was closed, or restarted
 
     const videos = [];
     pages.forEach((page, at) => {
       const spot = round[at];
       if (page.failed) {
-        // Once more before giving up on it: a 429 or a 503 is a bad moment
-        // rather than a bad folder. A second refusal costs that folder alone,
-        // which Graph hands out for shortcuts to drives it will not open
-        // ("ObjectHandle is Invalid") and for the odd random 400.
         if (!spot.tried) queue.push({ ...spot, tried: true });
         else { skipped.push(spot.name || 'a folder'); refused = page.failed; }
         return;
       }
       videos.push(...page.videos);
+      found[spot.home].push(...page.videos);
       if (page.next) queue.push({ ...spot, next: page.next, tried: false });
       // A subfolder that arrives without a drive of its own lives in the same
       // drive as the folder holding it; passing its missing id straight back to
       // Graph asks for /drives/null/items/… and loses the whole walk.
       queue.push(...page.folders.map((f) => ({
-        driveId: f.driveId || spot.driveId, itemId: f.id, name: f.name, next: null,
+        driveId: f.driveId || spot.driveId, itemId: f.id, name: f.name,
+        next: null, home: spot.home,
       })));
     });
 
-    found += videos.length;
+    served += videos.length;
     if (videos.length) onPage(videos);
   }
 
   // Nothing anywhere, and something was refused: that refusal is the answer,
   // rather than a quiet "no videos here" over a folder full of them.
-  if (!found && refused) throw new Error(refused);
+  if (!served && refused) throw new Error(refused);
+  return found;
+}
+
+/** Where a folder's finished walk is remembered. */
+const walkKey = (spot) => `walk:${spot.driveId || 'me'}:${spot.itemId || 'root'}`;
+
+// One background re-walk per folder per session: a cached walk is served as it
+// stands, and the refresh quietly replaces it for next time.
+const rewalked = new Set();
+
+function refreshWalk(spot) {
+  const key = walkKey(spot);
+  if (rewalked.has(key)) return;
+  rewalked.add(key);
+  (async () => {
+    const found = await walkTrees([spot], () => true, () => {}, []);
+    if (found) await graph.kvSet(key, { at: Date.now(), videos: found[0] });
+  })().catch(() => { /* next session's shuffle walks it properly */ });
+}
+
+async function shufflePool(run, onPage, skipped = []) {
+  const roots = shuffleDirs(shuffle.dirs);
+  // The listing already knows the answer only when it is the whole tree AND the
+  // tree asked for is the one on screen.
+  if (!roots.length && state.flatten && !moreToLoad() && !state.loading) {
+    onPage(state.videos.filter((v) => !v.isFolder));
+    return;
+  }
+  const { driveId, itemId } = state.source || {};
+  const spots = roots.length
+    ? roots.map((f) => ({ driveId: f.driveId, itemId: f.id, name: f.name }))
+    : [{ driveId, itemId, name: '' }];
+
+  // A folder walked before answers from IndexedDB at once -- the whole tree,
+  // no requests -- and is re-walked quietly behind the shuffle so the NEXT
+  // evening sees whatever was added since. At worst a pick is a video deleted
+  // since the walk, which fails to open exactly as any deleted video does.
+  const todo = [];
+  for (const spot of spots) {
+    const held = await graph.kvGet(walkKey(spot));
+    if (held && Array.isArray(held.videos) && held.videos.length) {
+      onPage(held.videos);
+      refreshWalk(spot);
+    } else {
+      todo.push(spot);
+    }
+  }
+  if (!todo.length) return;
+
+  const found = await walkTrees(todo, () => shuffle.run === run, onPage, skipped);
+  if (!found) return;
+  await Promise.all(todo.map((spot, at) => graph.kvSet(walkKey(spot), {
+    at: Date.now(), videos: found[at],
+  })));
 }
 
 async function startShuffle() {
@@ -1798,7 +1910,12 @@ function shuffleStep(step) {
     shuffle.seen = [];
     shuffle.at = -1;
   }
-  const pick = fresh[Math.floor(Math.random() * fresh.length)];
+  // The pick drawn ahead, if it is still drawable; its stream URL is already
+  // in hand, which is what makes Next feel instant.
+  const pick = (shuffle.ahead && fresh.some((v) => v.id === shuffle.ahead.id))
+    ? shuffle.ahead
+    : fresh[Math.floor(Math.random() * fresh.length)];
+  shuffle.ahead = null;
   shuffle.seen.push(pick);
   shuffle.at = shuffle.seen.length - 1;
   goToVideo(pick, step);
@@ -1809,6 +1926,7 @@ function stopShuffle() {
   shuffle.on = false;
   shuffle.pool = [];
   shuffle.seen = [];
+  shuffle.ahead = null;
   shuffle.at = -1;
   shuffle.walking = false;
   shuffle.run += 1;   // abandon any walk still running
@@ -1960,7 +2078,33 @@ async function confirmMove() {
   gridKey = ''; // the grid shrank, so it has to be rebuilt rather than appended
   render();
 
-  if (moved) toast(`Moved ${moved} to ${dest.name}`, 'ok');
+  // Undo puts each one back where it came from -- the parent Graph reported
+  // when it was listed. Within one drive by construction: it just came from there.
+  const undoable = moving.filter((v) => v.parentId
+    && !failed.some((f) => f.startsWith(`${v.name}:`)));
+  if (moved) {
+    toast(`Moved ${moved} to ${dest.name}`, 'ok', undoable.length ? {
+      label: 'Undo',
+      run: async () => {
+        setBusy('Putting them back…');
+        let back = 0;
+        for (const video of undoable) {
+          try {
+            await graph.moveItem({ ...video, driveId: video.driveId }, {
+              driveId: video.driveId, itemId: video.parentId,
+            });
+            back += 1;
+          } catch { /* it stays where it was moved; the toast below says so */ }
+        }
+        setBusy('');
+        toast(back === undoable.length
+          ? `Put ${back} back`
+          : `Put ${back} of ${undoable.length} back`, back ? 'ok' : 'err');
+        const here = state.stack[state.stack.length - 1] || null;
+        openFolder(here, { push: false });
+      },
+    } : null);
+  }
   if (failed.length) toast(`${failed.length} failed — ${failed[0]}`, 'err');
 }
 
@@ -2804,6 +2948,63 @@ function renderPlayerDetails(video) {
   if (faces) box.appendChild(faces);
 }
 
+/**
+ * Whatever the next press will most likely play, its stream URL fetched now.
+ *
+ * In a listing that is simply the next card. In a shuffle the next pick is
+ * DRAWN here, ahead of the press, so there is something to warm -- the press
+ * then plays exactly the pick that was warmed.
+ */
+function primeNext() {
+  let next = null;
+  if (shuffle.on && shuffle.pool.length) {
+    if (shuffle.at + 1 < shuffle.seen.length) {
+      next = shuffle.seen[shuffle.at + 1];
+    } else {
+      const shown = new Set(shuffle.seen.map((v) => v.id));
+      const fresh = shuffle.pool.filter((v) => !shown.has(v.id));
+      if (fresh.length) {
+        shuffle.ahead = fresh[Math.floor(Math.random() * fresh.length)];
+        next = shuffle.ahead;
+      }
+    }
+  } else if (state.playingId) {
+    const list = playerList();
+    const at = list.findIndex((v) => v.id === state.playingId);
+    if (at >= 0 && list.length > 1) next = list[(at + 1) % list.length];
+  }
+  if (next) graph.warmStream(next.driveId, next.id);
+}
+
+/**
+ * The lock screen and the headset buttons, taught what is playing.
+ *
+ * Without this the notification says the page's address and the next-track
+ * button does nothing; with it, the video's name and thumbnail ride along and
+ * prev/next walk the same list the swipe does.
+ */
+function syncMediaSession(video) {
+  if (!('mediaSession' in navigator)) return;
+  try {
+    const art = thumbCache.get(video.id);
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: video.name.replace(/\.[^.]+$/, ''),
+      artist: video.folderName || 'Video Explorer',
+      artwork: art ? [{ src: art }] : [],
+    });
+    navigator.mediaSession.setActionHandler('previoustrack', () => playSibling(-1));
+    navigator.mediaSession.setActionHandler('nexttrack', () => playSibling(1));
+    navigator.mediaSession.setActionHandler('seekbackward', (d) => {
+      const el = $('#playerVideo');
+      el.currentTime = Math.max(0, el.currentTime - (d.seekOffset || 10));
+    });
+    navigator.mediaSession.setActionHandler('seekforward', (d) => {
+      const el = $('#playerVideo');
+      el.currentTime += d.seekOffset || 10;
+    });
+  } catch { /* a lock screen without artwork is not worth an error */ }
+}
+
 async function openPlayer(video) {
   const modal = $('#player');
   const el = $('#playerVideo');
@@ -2838,6 +3039,9 @@ async function openPlayer(video) {
     // Once you have asked for sound, opening a video means watching it.
     if (soundOn) beginPlayback();
     else startPreview();
+    syncMediaSession(video);
+    // And the one after this, resolved while nobody is waiting on it.
+    primeNext();
   } catch (err) {
     toast(err.message, 'err');
     closePlayer();
@@ -2960,23 +3164,112 @@ function syncPlayerNav() {
  * Horizontal swipes only, and not from the bottom of the screen: that strip is
  * the video's own controls, where a sideways drag is a seek.
  */
+/**
+ * Pull down from the top of the grid to fetch the folder again.
+ *
+ * A PWA pinned to the home screen has no reload button, so "is this current?"
+ * had no answer short of navigating away and back. The gesture everyone
+ * already knows does it: only from the very top, only on the grid, and it has
+ * to be a deliberate pull -- 70px -- before letting go means anything.
+ */
+function attachPullToRefresh() {
+  const hint = $('#pullHint');
+  let from = null;
+  let armed = false;
+
+  const overlayOpen = () => !$('#player').hidden || !$('#adv').hidden
+    || !$('#shuffle').hidden || !$('#labels').hidden || !$('#picker').hidden
+    || !$('#lineup').hidden;
+
+  document.addEventListener('touchstart', (ev) => {
+    from = null;
+    armed = false;
+    if (window.scrollY > 0 || overlayOpen() || ev.touches.length !== 1) return;
+    from = ev.touches[0].clientY;
+  }, { passive: true });
+
+  document.addEventListener('touchmove', (ev) => {
+    if (from === null || !hint) return;
+    const pulled = ev.touches[0].clientY - from;
+    if (pulled <= 0 || window.scrollY > 0) { armed = false; hint.hidden = true; return; }
+    armed = pulled > 70;
+    hint.hidden = pulled < 14;
+    hint.textContent = armed ? 'Release to refresh' : 'Pull to refresh';
+    hint.classList.toggle('armed', armed);
+  }, { passive: true });
+
+  document.addEventListener('touchend', () => {
+    if (hint) hint.hidden = true;
+    if (!armed) { from = null; return; }
+    armed = false;
+    from = null;
+    const here = state.stack[state.stack.length - 1] || null;
+    openFolder(here, { push: false });
+  }, { passive: true });
+}
+
 function attachPlayerSwipe() {
   const modal = $('#player');
   let from = null;
+  // A vertical drag while something is playing: the right half of the picture
+  // rides the volume, the left half the brightness. Brightness is a filter on
+  // the element -- nothing about the file changes -- and the volume drag also
+  // covers phones whose video element honours it (iOS does not, and there the
+  // gesture simply does nothing, which is what iOS itself wants).
+  let sliding = null; // { what: 'volume'|'bright', base }
+  let bright = 1;
+
+  const gauge = (text) => {
+    const el = $('#playerGauge');
+    if (!el) return;
+    el.textContent = text;
+    el.hidden = false;
+    clearTimeout(gauge.timer);
+    gauge.timer = setTimeout(() => { el.hidden = true; }, 700);
+  };
 
   modal.addEventListener('touchstart', (ev) => {
+    sliding = null;
     // The bar and the arrows are taps, not swipes.
     if (ev.touches.length !== 1 || ev.target.closest('.player-bar, .player-nav')) { from = null; return; }
     const t = ev.touches[0];
     from = t.clientY > window.innerHeight - 90 ? null : { x: t.clientX, y: t.clientY };
   }, { passive: true });
 
+  modal.addEventListener('touchmove', (ev) => {
+    if (!from || ev.touches.length !== 1) return;
+    const el = $('#playerVideo');
+    if (!el || !el.controls) return; // gestures belong to a playthrough, not the preview
+    const t = ev.touches[0];
+    const dx = t.clientX - from.x;
+    const dy = t.clientY - from.y;
+    if (!sliding) {
+      if (Math.abs(dy) < 34 || Math.abs(dy) < Math.abs(dx) * 1.5) return;
+      sliding = from.x > window.innerWidth / 2
+        ? { what: 'volume', base: el.volume }
+        : { what: 'bright', base: bright };
+    }
+    const shift = -dy / (window.innerHeight * 0.7);
+    if (sliding.what === 'volume') {
+      const level = Math.max(0, Math.min(1, sliding.base + shift));
+      try { el.volume = level; el.muted = level === 0; } catch { /* iOS owns it */ }
+      gauge(`🔊 ${Math.round(level * 100)}%`);
+    } else {
+      bright = Math.max(0.4, Math.min(1.8, sliding.base + shift * 1.4));
+      el.style.filter = Math.abs(bright - 1) < 0.03 ? '' : `brightness(${bright.toFixed(2)})`;
+      gauge(`☀ ${Math.round(bright * 100)}%`);
+    }
+  }, { passive: true });
+
   modal.addEventListener('touchend', (ev) => {
     if (!from) return;
+    const wasSliding = sliding;
+    sliding = null;
     const t = ev.changedTouches[0];
     const dx = t.clientX - from.x;
     const dy = t.clientY - from.y;
     from = null;
+    if (wasSliding) return; // a volume drag is not a swipe to the next video
     if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
     playSibling(dx < 0 ? 1 : -1);
   }, { passive: true });
@@ -3012,6 +3305,7 @@ async function boot() {
   $('#playerPrev').addEventListener('click', () => playSibling(-1));
   $('#playerNext').addEventListener('click', () => playSibling(1));
   attachPlayerSwipe();
+  attachPullToRefresh();
   watchOverlays();
   $('#loadMore').addEventListener('click', () => loadMore());
 

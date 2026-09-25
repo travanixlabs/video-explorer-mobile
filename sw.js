@@ -9,7 +9,7 @@
  * would fill the phone and serve stale, dead URLs.
  */
 
-const VERSION = 'v12';
+const VERSION = 'v13';
 const SHELL = [
   './',
   './index.html',
@@ -39,17 +39,21 @@ self.addEventListener('fetch', (event) => {
   // endpoints, or a signed CDN URL goes straight to the network.
   if (url.origin !== self.location.origin || event.request.method !== 'GET') return;
 
-  // Network first, cache as the fallback. Cache-first is the usual advice for a
-  // shell, but it hands back yesterday's JavaScript every time the app changes —
-  // and the cache still covers the case that actually matters, which is opening
-  // the app with no signal.
+  // Stale-while-revalidate: the cached copy answers at once -- a launch on a
+  // slow connection used to pay a round trip per file before anything rendered
+  // -- and the network's answer replaces it behind, so an update lands one
+  // open later instead of holding this one up. No signal still means the
+  // cached app, exactly as before.
   event.respondWith(
-    fetch(event.request).then((res) => {
-      if (res.ok) {
-        const copy = res.clone();
-        caches.open(VERSION).then((cache) => cache.put(event.request, copy));
-      }
-      return res;
-    }).catch(() => caches.match(event.request).then((hit) => hit || caches.match('./index.html'))),
+    caches.match(event.request).then((hit) => {
+      const refresh = fetch(event.request).then((res) => {
+        if (res.ok) {
+          const copy = res.clone();
+          caches.open(VERSION).then((cache) => cache.put(event.request, copy));
+        }
+        return res;
+      }).catch(() => hit || caches.match('./index.html'));
+      return hit || refresh;
+    }),
   );
 });
