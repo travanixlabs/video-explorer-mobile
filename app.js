@@ -160,7 +160,8 @@ function setBusy(text) {
 // ------------------------------------------------------------------ library
 
 const EMPTY_RECORD = {
-  rating: 0, tags: [], models: [], studio: '', production: '', url: '', updated: 0,
+  rating: 0, tags: [], models: [], studio: '', production: '', url: '',
+  resume: 0, updated: 0,
 };
 
 /**
@@ -190,6 +191,9 @@ function recordFor(video) {
     // The reference's letter code — the series within the house.
     production: record.production || '',
     url: record.url || '',
+    // Where playback stood when this was last closed, on any device -- the
+    // desktop writes the same field.
+    resume: record.resume || 0,
     // When the labels last changed, which the date sort counts as a change to
     // the video: tagging one does not touch the file.
     updated: record.updated || 0,
@@ -383,7 +387,20 @@ function editRecord(video, patch) {
   const key = graph.recordKey(video);
   const current = state.library.records[key]
     || { rating: 0, tags: [], models: [], name: video.name };
-  const next = { ...current, name: video.name, updated: Date.now(), ...patch };
+  // Where playback stood is bookkeeping, not labelling: it must not push the
+  // video to the top of the date sort. Same rule as the desktop's apply().
+  const onlyResume = Object.keys(patch).every((k) => k === 'resume');
+  const next = {
+    ...current,
+    name: video.name,
+    updated: onlyResume ? (current.updated || 0) : Date.now(),
+    ...patch,
+  };
+  if (next.resume !== undefined) {
+    const at = Math.max(0, Math.round(Number(next.resume) || 0));
+    if (at > 0) next.resume = at;
+    else delete next.resume;
+  }
 
   // The desktop's shapes, so a record written here reads the same there: lists
   // deduped and sorted, the studio a single trimmed string, a url only if it is
@@ -406,7 +423,7 @@ function editRecord(video, patch) {
 
   // An empty record is noise in a file that syncs; match the desktop and drop it.
   if (!next.rating && !(next.tags || []).length && !(next.models || []).length
-    && !next.studio && !next.production && !next.url) {
+    && !next.studio && !next.production && !next.url && !next.resume) {
     delete state.library.records[key];
   } else state.library.records[key] = next;
   state.dirty = true;
@@ -2916,6 +2933,41 @@ function stopPreview() {
   preview.timer = null;
 }
 
+/**
+ * Where a video should start, and what is worth writing back -- the same two
+ * rules the desktop uses, so the two devices agree about what "watched" means.
+ * The first half-minute is not worth resuming into; within 45 seconds of the
+ * end counts as finished and clears the stored point; and a point is only
+ * written when it says something ten seconds newer than what is stored --
+ * every save here uploads the whole labels file.
+ */
+function resumeAt(record, duration) {
+  const at = Number(record && record.resume) || 0;
+  if (at < 30) return 0;
+  if (duration > 0 && at > duration - 45) return 0;
+  return at;
+}
+
+function resumeToKeep(current, duration, had) {
+  const done = duration > 0 && current > duration - 45;
+  if (done || current < 30) return had ? 0 : null;
+  if (Math.abs(current - had) < 10) return null;
+  return Math.round(current);
+}
+
+function saveResume() {
+  const el = $('#playerVideo');
+  if (!el || !el.controls || !state.playingId) return;
+  const video = (shuffle.on ? shuffle.pool : playerList())
+    .find((v) => v.id === state.playingId);
+  if (!video) return;
+  const record = recordFor(video);
+  const keep = resumeToKeep(Number(el.currentTime) || 0,
+    Number(el.duration) || video.duration || 0, record.resume || 0);
+  if (keep === null) return;
+  editRecord(video, { resume: keep });
+}
+
 /** The button turns the preview into a real playthrough, from the top. */
 function beginPlayback() {
   stopPreview();
@@ -2924,7 +2976,18 @@ function beginPlayback() {
   $('#playerBadge').hidden = true;
   el.controls = true;
   el.muted = !soundOn;
-  try { el.currentTime = 0; } catch { /* not seekable yet; it starts at 0 anyway */ }
+  // Picking up where any device left off; the offer to start over rides the
+  // toast, so carrying on costs nothing.
+  const video = (shuffle.on ? shuffle.pool : playerList())
+    .find((v) => v.id === state.playingId);
+  const back = video ? resumeAt(recordFor(video), Number(el.duration) || video.duration || 0) : 0;
+  try { el.currentTime = back; } catch { /* not seekable yet; it starts at 0 anyway */ }
+  if (back) {
+    toast(`Resumed at ${fmtTime(back)}`, 'ok', {
+      label: 'Start over',
+      run: () => { try { $('#playerVideo').currentTime = 0; } catch { /* fine */ } },
+    });
+  }
   el.play().catch(() => {});
 }
 
@@ -3261,6 +3324,10 @@ function attachPlayerSwipe() {
     }
   }, { passive: true });
 
+  // Double-tap on the edges: ten seconds back on the left, forward on the
+  // right. The middle is left to the native controls, whose single tap it is.
+  let lastTap = { at: 0, x: 0 };
+
   modal.addEventListener('touchend', (ev) => {
     if (!from) return;
     const wasSliding = sliding;
@@ -3270,13 +3337,44 @@ function attachPlayerSwipe() {
     const dy = t.clientY - from.y;
     from = null;
     if (wasSliding) return; // a volume drag is not a swipe to the next video
-    if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
-    playSibling(dx < 0 ? 1 : -1);
+    if (Math.abs(dx) >= 60 && Math.abs(dx) >= Math.abs(dy) * 1.5) {
+      playSibling(dx < 0 ? 1 : -1);
+      return;
+    }
+    // A tap, then: two of them in the same spot within 350ms is a seek.
+    if (Math.abs(dx) > 12 || Math.abs(dy) > 12) return;
+    const now = Date.now();
+    const paired = now - lastTap.at < 350 && Math.abs(t.clientX - lastTap.x) < 60;
+    lastTap = paired ? { at: 0, x: 0 } : { at: now, x: t.clientX };
+    if (!paired) return;
+    const el = $('#playerVideo');
+    if (!el || !el.controls) return;
+    const zone = t.clientX / window.innerWidth;
+    if (zone > 0.35 && zone < 0.65) return; // the middle belongs to the controls
+    const step = zone <= 0.35 ? -10 : 10;
+    try { el.currentTime = Math.max(0, (Number(el.currentTime) || 0) + step); } catch { /* fine */ }
+    gauge(step < 0 ? '⏪ 10s' : '10s ⏩');
   }, { passive: true });
+}
+
+/**
+ * Autoplay: when a video ends, the next one plays -- the listing's next, or in
+ * a shuffle the next pick, which is what makes shuffle a lean-back mode.
+ * Remembered per device; a phone on a data plan may well want it off.
+ */
+let autoNext = false;
+try { autoNext = localStorage.getItem('video-explorer.autonext') === '1'; } catch { /* fine */ }
+
+function syncAutoButton() {
+  const btn = $('#playerAuto');
+  if (!btn) return;
+  btn.classList.toggle('on', autoNext);
+  btn.title = autoNext ? 'Autoplay is on — videos follow each other' : 'Autoplay the next video';
 }
 
 function closePlayer() {
   stopPreview(); // a timer left running would seek a src that has gone
+  saveResume();  // where you stood, before the element forgets it
   const el = $('#playerVideo');
   el.pause();
   el.removeAttribute('src');
@@ -3302,8 +3400,32 @@ function closePlayer() {
 async function boot() {
   $('#signIn').addEventListener('click', () => auth.signIn().catch((e) => toast(e.message, 'err')));
   $('#playerClose').addEventListener('click', closePlayer);
-  $('#playerPrev').addEventListener('click', () => playSibling(-1));
+  // The music-player rule, on the BUTTON only: more than fifteen seconds in,
+  // back means "this one, from the top"; inside those fifteen seconds it means
+  // the previous video. The swipe keeps its plain meaning.
+  $('#playerPrev').addEventListener('click', () => {
+    const el = $('#playerVideo');
+    if (el && el.controls && (Number(el.currentTime) || 0) > 15) {
+      try { el.currentTime = 0; } catch { /* not seekable */ }
+      return;
+    }
+    playSibling(-1);
+  });
   $('#playerNext').addEventListener('click', () => playSibling(1));
+  $('#playerAuto').addEventListener('click', () => {
+    autoNext = !autoNext;
+    try { localStorage.setItem('video-explorer.autonext', autoNext ? '1' : '0'); } catch { /* fine */ }
+    syncAutoButton();
+    toast(autoNext ? 'Autoplay on' : 'Autoplay off', 'ok');
+  });
+  syncAutoButton();
+  // The position outlives a pause and the end -- and the end may hand over to
+  // the next video.
+  $('#playerVideo').addEventListener('pause', () => saveResume());
+  $('#playerVideo').addEventListener('ended', () => {
+    saveResume();
+    if (autoNext) playSibling(1);
+  });
   attachPlayerSwipe();
   attachPullToRefresh();
   watchOverlays();

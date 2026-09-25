@@ -833,3 +833,7 @@ body.selecting .tick { opacity: 1; }
   font-size: 13px;
   pointer-events: none;
 }
+
+#playerAuto.on { color: var(--accent); }
+/* Double-tap seeks must not be double-tap zooms. */
+.player-stage { touch-action: manipulation; }
