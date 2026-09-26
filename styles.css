@@ -794,6 +794,9 @@ body.selecting .tick { opacity: 1; }
 .toast.err { border-left-color: var(--danger); }
 
 /* A toast that offers a way back. */
+/* The marker that pulls the next chunk of cards in. */
+.videos-tail { height: 1px; }
+
 .toast-act {
   margin-left: 10px;
   padding: 2px 10px;

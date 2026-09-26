@@ -91,7 +91,11 @@ function normalise(item) {
   };
 }
 
-let PAGE = 200;
+// Graph will serve 999 children in one reply and was being asked for 200. A
+// flattened library folder of five thousand was twenty-five round trips where
+// it could have been six, and the whole library a thousand where it could be
+// two hundred -- each one a phone waiting on the network for nothing.
+let PAGE = 999;
 
 /** How many items a listing call asks for. Clamped to what Graph will serve. */
 export function setPageSize(size) {
@@ -477,7 +481,10 @@ export async function saveLibrary(library) {
   const res = await fetch(`${BASE}${LIBRARY_PATH}:/content`, {
     method: 'PUT',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(library, null, 1),
+    // Compact, matching what the desktop writes: the indentation was a fifth of
+    // the file, and this one goes up a phone's mobile data every time a star is
+    // pressed.
+    body: JSON.stringify(library),
   });
   if (!res.ok) throw new Error(`Could not save ratings (${res.status})`);
   loadedCount = count;

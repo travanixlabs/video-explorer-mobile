@@ -466,19 +466,34 @@ async function readLibrary() {
 }
 
 let saveTimer = null;
+let dirtySince = 0;
+/**
+ * A save is three megabytes over mobile data, so edits are gathered up rather
+ * than sent one at a time: rating five videos in a row is one upload.
+ *
+ * With a ceiling, though. A pure debounce means a steady hand -- a star every
+ * second down a long list -- never reaches a quiet moment, and nothing is
+ * written at all until it stops. So a burst that has been going for
+ * SAVE_AT_MOST is written where it stands and starts gathering again.
+ */
+const SAVE_AFTER_MS = 1200;
+const SAVE_AT_MOST_MS = 15000;
+
 function scheduleSave() {
+  if (!dirtySince) dirtySince = Date.now();
   clearTimeout(saveTimer);
-  // Batched: rating five videos in a row is one upload, not five, and each
-  // upload replaces the whole file so the last write has to be the winner.
+  const waited = Date.now() - dirtySince;
   saveTimer = setTimeout(async () => {
     if (!state.libraryLoaded) return;
     try {
       await graph.saveLibrary(state.library);
       state.dirty = false;
+      dirtySince = 0;
     } catch (err) {
+      dirtySince = 0;
       toast(err.message, 'err');
     }
-  }, 1200);
+  }, Math.max(0, Math.min(SAVE_AFTER_MS, SAVE_AT_MOST_MS - waited)));
 }
 
 // A pending edit must not be lost to a backgrounded tab — and coming back is
@@ -849,6 +864,14 @@ function filterByName(list) {
   // Folders have no rating or labels, so the advanced filter applies to videos
   // only — a folder row is navigation, not a result.
   if (advActive()) out = out.filter((item) => item.isFolder || matchesAdv(item));
+  // While a folder is still streaming in, the order is the order it arrives in.
+  //
+  // Any other ordering means an arriving page can belong anywhere, which moves
+  // the last card and makes appending wrong -- so the grid was thrown away and
+  // rebuilt from scratch on every page. Flattening the library under a rating
+  // sort is a thousand pages, and so a thousand rebuilds of a grid that ends up
+  // thousands of cards long. Sorted once at the end instead, where it costs one.
+  if (state.loading && moreToLoad()) return out;
   return sortVideos(out);
 }
 
@@ -1080,6 +1103,35 @@ let gridKey = '';
 let gridCount = 0;
 let gridTail = ''; // id of the last card appended, so a reorder is noticed
 
+/**
+ * How many cards the grid builds before waiting to be scrolled.
+ *
+ * Nothing is hidden from you: the whole folder is in the listing and the count
+ * above says so. This is only about how much of it exists as HTML at once --
+ * a flattened library is twenty-seven thousand cards, which on a phone is more
+ * memory than the browser will give the page, and every one of them wants a
+ * thumbnail fetched over mobile data for a tile nobody has scrolled to.
+ */
+const GRID_CHUNK = 120;
+let gridShown = GRID_CHUNK;
+let gridTailWatcher = null;
+
+function syncVideosTail(total) {
+  const tail = $('#videosTail');
+  if (!tail) return;
+  tail.hidden = gridCount >= total;
+  if (!gridTailWatcher) {
+    gridTailWatcher = new IntersectionObserver((entries) => {
+      if (!entries.some((e) => e.isIntersecting)) return;
+      if (gridCount >= gridShown) {
+        gridShown = gridCount + GRID_CHUNK;
+        renderVideos();
+      }
+    }, { rootMargin: '800px 0px' });
+    gridTailWatcher.observe(tail);
+  }
+}
+
 function renderVideos() {
   const wrap = $('#videos');
   const list = filterByName(state.videos);
@@ -1101,29 +1153,44 @@ function renderVideos() {
     wanted.clear();
     gridKey = key;
     gridCount = 0;
+    gridShown = GRID_CHUNK;
   }
+
+  // Never fewer than are already built: an arriving page must not un-draw what
+  // is on screen under a finger.
+  const upTo = Math.min(list.length, Math.max(gridShown, gridCount));
 
   if (state.grouped) {
     // Sections cannot be appended to the way a flat tail can: an arriving page
     // can belong to any of them, and can invent a new one that sorts to the
     // top. So grouping rebuilds — which is why it is a view you switch into on
     // a settled listing rather than the mode the app lives in.
-    if (gridCount !== list.length) {
+    if (gridCount !== upTo) {
       wrap.innerHTML = '';
       wanted.clear();
       state.groups = buildModelGroups(list, state.grouped);
+      let drawn = 0;
       for (const group of state.groups) {
+        if (drawn >= upTo) break;
         wrap.appendChild(buildGroupHead(group));
-        for (const video of group.files) wrap.appendChild(buildCard(video));
+        for (const video of group.files) {
+          if (drawn >= upTo) break;
+          wrap.appendChild(buildCard(video));
+          drawn += 1;
+        }
       }
-      gridCount = list.length;
+      gridCount = drawn;
     }
   } else {
     state.groups = [];
-    for (let i = gridCount; i < list.length; i += 1) wrap.appendChild(buildCard(list[i]));
-    gridCount = list.length;
+    // Built off-document and attached once, rather than a layout per card.
+    const frag = document.createDocumentFragment();
+    for (let i = gridCount; i < upTo; i += 1) frag.appendChild(buildCard(list[i]));
+    wrap.appendChild(frag);
+    gridCount = upTo;
   }
   gridTail = gridCount ? list[gridCount - 1].id : '';
+  syncVideosTail(list.length);
 
   // Grouped, the honest number is cards rather than videos: the same video is
   // on screen once per performer in it, and "12 of 9" would look like a bug.
