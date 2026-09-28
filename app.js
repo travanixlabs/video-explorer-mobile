@@ -2851,6 +2851,18 @@ let playerReturn = null;
  */
 let soundOn = false;
 
+/**
+ * Whether the player is watching rather than previewing.
+ *
+ * Opening a video from the grid shows the frame strip first, because a tap on a
+ * tile is usually a look rather than a commitment. A swipe is not: you are
+ * already watching, and the next one arriving as a still is the gesture failing
+ * to do the obvious thing. So playback, once started, is carried across a swipe
+ * the way sound already is -- and it is reset on the way out, so the next trip
+ * in from the grid gets the preview again.
+ */
+let watching = false;
+
 function setSoundOn(next) {
   soundOn = Boolean(next);
   const el = $('#playerVideo');
@@ -3038,6 +3050,7 @@ function saveResume() {
 /** The button turns the preview into a real playthrough, from the top. */
 function beginPlayback() {
   stopPreview();
+  watching = true;
   const el = $('#playerVideo');
   $('#playerPlay').hidden = true;
   $('#playerBadge').hidden = true;
@@ -3166,8 +3179,9 @@ async function openPlayer(video) {
   setBusy('Opening…');
   try {
     el.src = await graph.streamUrl(video.driveId, video.id);
-    // Once you have asked for sound, opening a video means watching it.
-    if (soundOn) beginPlayback();
+    // Once you have asked for sound, opening a video means watching it -- and so
+    // does arriving here from a video you were already watching.
+    if (soundOn || watching) beginPlayback();
     else startPreview();
     syncMediaSession(video);
     // And the one after this, resolved while nobody is waiting on it.
@@ -3440,6 +3454,7 @@ function syncAutoButton() {
 }
 
 function closePlayer() {
+  watching = false;
   stopPreview(); // a timer left running would seek a src that has gone
   saveResume();  // where you stood, before the element forgets it
   const el = $('#playerVideo');
