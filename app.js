@@ -988,6 +988,15 @@ function syncGroupButton() {
   }[state.grouped];
 }
 
+/**
+ * How sure the recogniser has to be before a suggestion is worth showing.
+ *
+ * The desktop keeps this in filter.js, which the phone does not load. Same
+ * number on purpose: a group here and a suggestion there disagreeing about who
+ * might be in a video is the confusing part, not the number itself.
+ */
+const FACE_FLOOR = 0.50;
+
 function buildModelGroups(list, mode = 'models') {
   const groups = new Map();
   const unnamed = [];
@@ -998,8 +1007,11 @@ function buildModelGroups(list, mode = 'models') {
     const record = recordFor(video);
     // The credited names, or the ones the recogniser put forward. Same view
     // over a different question: who is in this, against who might be.
+    //
+    // Only the ones at the floor, matching the desktop: a section built from
+    // guesses that weak is a performer you cannot act on.
     const names = (guessed
-      ? facesFor(video).suggested.map((s) => s.name)
+      ? facesFor(video).suggested.filter((s) => s.score >= FACE_FLOOR).map((s) => s.name)
       : (record.models || [])).map((n) => String(n).trim()).filter(Boolean);
     if (!names.length) { unnamed.push(video); continue; }
     const rating = Math.max(0, Math.min(5, Math.round(Number(record.rating) || 0)));
