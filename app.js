@@ -881,10 +881,6 @@ function filterByName(list) {
  */
 /** Which label a sort key reads, and what it reads out of it. */
 const LABEL_SORTS = {
-  studio: (v) => (recordFor(v).studio || '').trim(),
-  // One per video like the studio, so sorting by it gathers a series together
-  // and the numeric name tiebreak orders the shoots inside each one.
-  production: (v) => (recordFor(v).production || '').trim(),
   models: (v) => firstAlphabetically(recordFor(v).models),
   tags: (v) => firstAlphabetically(recordFor(v).tags),
 };
@@ -2263,14 +2259,11 @@ function buildCard(video) {
 }
 
 /**
- * The three kinds of label, in the order the desktop shows them: the studio
- * first — the one there can only be one of — then the performers, then the
- * tags. Only tags carry the "+" here; the editor it opens covers all three, so
- * three buttons would have opened the same sheet.
+ * The kinds of label a card shows, in the order the desktop shows them: the
+ * performers, then the tags. Studio and production were taken out of the app;
+ * what is stored under them is kept, just no longer drawn or edited.
  */
 const LABEL_FIELDS = [
-  { field: 'studio', chip: 'chip studio' },
-  { field: 'production', chip: 'chip production' },
   { field: 'models', chip: 'chip model' },
   { field: 'tags', chip: 'chip' },
 ];
@@ -2352,22 +2345,11 @@ function openLabels(videos) {
   const first = recordFor(videos[0]);
   $('#labelTags').value = single ? (first.tags || []).join(', ') : '';
   $('#labelModels').value = single ? (first.models || []).join(', ') : '';
-  // A single value only makes a sensible starting point when they all agree.
-  for (const [field, box] of [['studio', '#labelStudio'], ['production', '#labelProduction']]) {
-    const held = new Set(videos.map((v) => recordFor(v)[field] || ''));
-    $(box).value = held.size === 1 ? [...held][0] : '';
-  }
-
   renderLabelSuggestions();
   $('#labels').hidden = false;
 }
 
 const LABEL_INPUTS = {
-  studio: { input: '#labelStudio', suggest: '#labelStudioSuggest', chip: 'chip studio', single: true },
-  production: {
-    input: '#labelProduction', suggest: '#labelProductionSuggest',
-    chip: 'chip production', single: true,
-  },
   models: { input: '#labelModels', suggest: '#labelModelsSuggest', chip: 'chip model' },
   tags: { input: '#labelTags', suggest: '#labelTagsSuggest', chip: 'chip' },
 };
@@ -2387,7 +2369,12 @@ function renderLabelSuggestions() {
       continue;
     }
     const used = new Set(parseList($(spec.input).value).map((t) => t.toLowerCase()));
-    for (const entry of vocab.slice(0, 60)) {
+    // What the video already has comes first, so the 60 shown always include it.
+    const ordered = [
+      ...vocab.filter((entry) => used.has(entry.tag.toLowerCase())),
+      ...vocab.filter((entry) => !used.has(entry.tag.toLowerCase())),
+    ];
+    for (const entry of ordered.slice(0, Math.max(60, used.size))) {
       const chip = document.createElement('button');
       chip.className = spec.chip + (used.has(entry.tag.toLowerCase()) ? ' on' : '');
       chip.textContent = `${entry.tag} · ${entry.count}`;
@@ -2429,22 +2416,16 @@ function followListing(before) {
 function commitLabels(mode) {
   const tags = parseList($('#labelTags').value);
   const models = parseList($('#labelModels').value);
-  const studio = $('#labelStudio').value.trim();
-  const production = $('#labelProduction').value.trim();
   const videos = labelTargets;
   $('#labels').hidden = true;
 
   for (const video of videos) {
     const record = recordFor(video);
     const patch = mode === 'replace'
-      ? { tags, models, studio, production }
+      ? { tags, models }
       : {
         tags: [...(record.tags || []), ...tags],
         models: [...(record.models || []), ...models],
-        // A single value has nothing to append to, so Add sets it only when
-        // the box has something in it and leaves it alone otherwise.
-        ...(studio ? { studio } : {}),
-        ...(production ? { production } : {}),
       };
     editRecord(video, patch);
   }
