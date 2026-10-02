@@ -1555,6 +1555,22 @@ function renderAdv() {
     gap.classList.add('none');
     host.appendChild(gap);
 
+    // Five thousand performers is a list with no end on a phone. Only the names
+    // you have picked are shown; the rest are found through the box below.
+    if (field === 'models') {
+      const counts = new Map(vocabularyByName('models').map((e) => [e.tag, e.count]));
+      for (const [name, mode] of advDraft.models) {
+        if (name === NOTHING) continue;
+        const n = counts.get(name);
+        host.appendChild(advChip(n ? `${name} · ${n}` : name, mode, () => {
+          cycleIn(advDraft.models, name);
+          renderAdv();
+        }));
+      }
+      renderAdvModelsFound();
+      continue;
+    }
+
     const vocab = vocabularyByName(field);
     if (!vocab.length) host.insertAdjacentHTML('beforeend', '<span class="dim">nothing yet</span>');
     for (const entry of vocab) {
@@ -1584,6 +1600,30 @@ function renderAdv() {
   say('tags', 'tag');
   say('ratings', 'rating');
   $('#advSummary').textContent = bits.join(' · ') || 'no filters';
+}
+
+/**
+ * What the model search box has found. Nothing until two letters are typed:
+ * one letter matches thousands and would bring the endless list straight back.
+ * Tapping a match requires it and empties the box, ready for the next name.
+ */
+function renderAdvModelsFound() {
+  const host = $('#advModelsFound');
+  const box = $('#advModelsFind');
+  if (!host || !box) return;
+  host.innerHTML = '';
+  const want = box.value.trim().toLowerCase();
+  if (want.length < 2) return;
+  const found = vocabularyByName('models')
+    .filter((e) => !advDraft.models.has(e.tag) && e.tag.toLowerCase().includes(want));
+  if (!found.length) { host.innerHTML = '<span class="dim">no one by that name</span>'; return; }
+  for (const entry of found) {
+    host.appendChild(advChip(`${entry.tag} · ${entry.count}`, null, () => {
+      advDraft.models.set(entry.tag, 'in');
+      box.value = '';
+      renderAdv();
+    }));
+  }
 }
 
 function advChip(label, mode, onClick) {
@@ -3523,7 +3563,9 @@ async function boot() {
 
   syncGroupButton();
 
-  $('#advBtn').addEventListener('click', openAdv);
+  $('#advBtn').addEventListener('click', () => { $('#advModelsFind').value = ''; openAdv(); });
+  // Only the results redraw while typing, so the box keeps the caret.
+  $('#advModelsFind').addEventListener('input', renderAdvModelsFound);
   $('#advClose').addEventListener('click', () => { $('#adv').hidden = true; });
   $('#advApply').addEventListener('click', applyAdv);
   $('#advReset').addEventListener('click', () => {

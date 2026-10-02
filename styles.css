@@ -840,3 +840,6 @@ body.selecting .tick { opacity: 1; }
 #playerAuto.on { color: var(--accent); }
 /* Double-tap seeks must not be double-tap zooms. */
 .player-stage { touch-action: manipulation; }
+
+/* The model search in the filter sheet sits under the names already picked. */
+.adv-find { width: 100%; margin: 6px 0 4px; }
