@@ -9,7 +9,7 @@
  * would fill the phone and serve stale, dead URLs.
  */
 
-const VERSION = 'v17';
+const VERSION = 'v18';
 const SHELL = [
   './',
   './index.html',
