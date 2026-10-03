@@ -171,11 +171,15 @@
 
     <div class="adv-body">
       <div class="adv-label">Models</div>
-      <input id="labelModels" type="text" class="search" placeholder="performer names, comma separated" autocomplete="off">
+      <div id="labelModelsPicked" class="label-picked"></div>
+      <input id="labelModels" type="text" class="search" placeholder="find a name, or type a new one and tap enter"
+             autocomplete="off" autocapitalize="words" spellcheck="false" enterkeyhint="enter">
       <div id="labelModelsSuggest" class="chip-row"></div>
 
       <div class="adv-label">Tags</div>
-      <input id="labelTags" type="text" class="search" placeholder="comma separated" autocomplete="off">
+      <div id="labelTagsPicked" class="label-picked"></div>
+      <input id="labelTags" type="text" class="search" placeholder="find a tag, or type a new one and tap enter"
+             autocomplete="off" spellcheck="false" enterkeyhint="enter">
       <div id="labelTagsSuggest" class="chip-row"></div>
 
       <div class="adv-label">Rating</div>

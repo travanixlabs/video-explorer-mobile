@@ -633,6 +633,14 @@ body.selecting .tick { opacity: 1; }
 }
 .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
 
+/* The label sheet's picks, each with a cross big enough for a thumb. */
+.label-picked { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 8px; }
+.label-picked[hidden] { display: none; }
+.chip.has-x { display: inline-flex; align-items: center; gap: 4px; padding-right: 2px; }
+.chip.has-x .chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.chip-x { background: none; border: none; color: inherit; opacity: .6; font-size: 12px;
+  line-height: 1; padding: 6px 8px; margin: -6px 0; }
+
 /* The player's +: as small as a chip gets, and quieter than the labels. */
 .chip.chip-add { border-style: dashed; color: var(--text-faint); padding-left: 9px; padding-right: 9px; }
 

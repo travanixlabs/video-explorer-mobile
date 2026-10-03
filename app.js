@@ -2397,15 +2397,17 @@ function openLabels(videos) {
 
   $('#labelsTitle').textContent = single ? videos[0].name : `${videos.length} videos`;
   $('#labelsHint').textContent = single
-    ? 'Add appends, Replace overwrites.'
+    ? 'Add appends. Replace saves exactly these.'
     : `Add appends to each. Replace overwrites all ${videos.length}.`;
   $('#labelsReplace').textContent = single ? 'Replace' : `Replace on ${videos.length}`;
 
   // One video's values make Replace a sensible edit; across several there is no
   // shared starting point unless they already agree.
   const first = recordFor(videos[0]);
-  $('#labelTags').value = single ? (first.tags || []).join(', ') : '';
-  $('#labelModels').value = single ? (first.models || []).join(', ') : '';
+  labelDraft.tags = single ? [...(first.tags || [])] : [];
+  labelDraft.models = single ? [...(first.models || [])] : [];
+  $('#labelTags').value = '';
+  $('#labelModels').value = '';
   labelRating = single ? (Number(first.rating) || 0) : null;
   renderLabelRating();
 
@@ -2414,9 +2416,26 @@ function openLabels(videos) {
 }
 
 const LABEL_INPUTS = {
-  models: { input: '#labelModels', suggest: '#labelModelsSuggest', chip: 'chip model' },
-  tags: { input: '#labelTags', suggest: '#labelTagsSuggest', chip: 'chip' },
+  models: { input: '#labelModels', suggest: '#labelModelsSuggest', picked: '#labelModelsPicked', chip: 'chip model' },
+  tags: { input: '#labelTags', suggest: '#labelTagsSuggest', picked: '#labelTagsPicked', chip: 'chip' },
 };
+
+/**
+ * What the sheet will save, per field, as a list. The box used to hold it as
+ * comma-separated text, which left every pick sitting there as words; now the
+ * picks are pills with a cross and the box only finds the next one.
+ */
+const labelDraft = { tags: [], models: [] };
+
+function draftAdd(field, raw) {
+  const value = String(raw || '').trim().replace(/\s+/g, ' ');
+  if (!value) return false;
+  const known = vocabularyByName(field).find((e) => e.tag.toLowerCase() === value.toLowerCase());
+  const name = known ? known.tag : value;
+  if (labelDraft[field].some((t) => t.toLowerCase() === name.toLowerCase())) return false;
+  labelDraft[field].push(name);
+  return true;
+}
 
 function parseList(text) {
   return text.split(',').map((t) => t.trim()).filter(Boolean);
@@ -2425,35 +2444,50 @@ function parseList(text) {
 /** The vocabulary as taps, which beats typing a name on a phone. */
 function renderLabelSuggestions() {
   for (const [field, spec] of Object.entries(LABEL_INPUTS)) {
+    // The pills: what will be saved, each with its own cross.
+    const pills = $(spec.picked);
+    pills.innerHTML = '';
+    for (const name of labelDraft[field]) {
+      const pill = document.createElement('span');
+      pill.className = spec.chip + ' has-x';
+      const text = document.createElement('span');
+      text.className = 'chip-text';
+      text.textContent = name;
+      const cross = document.createElement('button');
+      cross.className = 'chip-x';
+      cross.textContent = '\u2715';
+      cross.setAttribute('aria-label', `Take off ${name}`);
+      cross.addEventListener('click', () => {
+        labelDraft[field] = labelDraft[field].filter((t) => t.toLowerCase() !== name.toLowerCase());
+        renderLabelSuggestions();
+      });
+      pill.append(text, cross);
+      pills.appendChild(pill);
+    }
+    pills.hidden = !labelDraft[field].length;
+
     const box = $(spec.suggest);
     box.innerHTML = '';
     const vocab = vocabularyByName(field);
-    if (!vocab.length) {
-      box.innerHTML = '<span class="dim">nothing yet</span>';
+    const want = $(spec.input).value.trim().toLowerCase();
+    const used = new Set(labelDraft[field].map((t) => t.toLowerCase()));
+    const found = vocab.filter((entry) => !used.has(entry.tag.toLowerCase())
+      && (!want || entry.tag.toLowerCase().includes(want)));
+    if (!found.length) {
+      box.innerHTML = want
+        ? '<span class="dim">nothing by that name \u2014 tap enter to add it</span>'
+        : '<span class="dim">nothing yet</span>';
       continue;
     }
-    const used = new Set(parseList($(spec.input).value).map((t) => t.toLowerCase()));
-    // What the video already has comes first, so the 60 shown always include it.
-    const ordered = [
-      ...vocab.filter((entry) => used.has(entry.tag.toLowerCase())),
-      ...vocab.filter((entry) => !used.has(entry.tag.toLowerCase())),
-    ];
-    for (const entry of ordered.slice(0, Math.max(60, used.size))) {
+    // Typing narrows to every match. With nothing typed, a first 60 to tap
+    // from: the whole performer list on a phone is a scroll with no end.
+    for (const entry of want ? found : found.slice(0, 60)) {
       const chip = document.createElement('button');
-      chip.className = spec.chip + (used.has(entry.tag.toLowerCase()) ? ' on' : '');
+      chip.className = spec.chip;
       chip.textContent = `${entry.tag} · ${entry.count}`;
       chip.addEventListener('click', () => {
-        if (spec.single) {
-          // One value: a second tap swaps it, tapping the current one clears it.
-          const now = $(spec.input).value.trim().toLowerCase();
-          $(spec.input).value = now === entry.tag.toLowerCase() ? '' : entry.tag;
-        } else {
-          const current = parseList($(spec.input).value);
-          const at = current.findIndex((t) => t.toLowerCase() === entry.tag.toLowerCase());
-          if (at >= 0) current.splice(at, 1);
-          else current.push(entry.tag);
-          $(spec.input).value = current.join(', ');
-        }
+        draftAdd(field, entry.tag);
+        $(spec.input).value = '';
         renderLabelSuggestions();
       });
       box.appendChild(chip);
@@ -2478,8 +2512,13 @@ function followListing(before) {
 }
 
 function commitLabels(mode) {
-  const tags = parseList($('#labelTags').value);
-  const models = parseList($('#labelModels').value);
+  // A name typed but not yet entered still counts.
+  for (const spec of Object.values(LABEL_INPUTS)) {
+    const field = spec.input === '#labelTags' ? 'tags' : 'models';
+    if (draftAdd(field, $(spec.input).value)) $(spec.input).value = '';
+  }
+  const tags = [...labelDraft.tags];
+  const models = [...labelDraft.models];
   const videos = labelTargets;
   $('#labels').hidden = true;
 
@@ -3644,8 +3683,26 @@ async function boot() {
   $('#labelsClose').addEventListener('click', () => { $('#labels').hidden = true; });
   $('#labelsAdd').addEventListener('click', () => commitLabels('add'));
   $('#labelsReplace').addEventListener('click', () => commitLabels('replace'));
-  for (const spec of Object.values(LABEL_INPUTS)) {
-    $(spec.input).addEventListener('input', renderLabelSuggestions);
+  for (const [field, spec] of Object.entries(LABEL_INPUTS)) {
+    const box = $(spec.input);
+    box.addEventListener('input', () => {
+      // A comma still means "that one's done".
+      if (box.value.includes(',')) {
+        const parts = box.value.split(',');
+        const rest = parts.pop();
+        for (const part of parts) draftAdd(field, part);
+        box.value = rest.trimStart();
+      }
+      renderLabelSuggestions();
+    });
+    box.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter') return;
+      ev.preventDefault();
+      if (draftAdd(field, box.value) || box.value.trim()) {
+        box.value = '';
+        renderLabelSuggestions();
+      }
+    });
   }
   $('#selDelete').addEventListener('click', deleteSelection);
   $('#playerPlay').addEventListener('click', beginPlayback);
