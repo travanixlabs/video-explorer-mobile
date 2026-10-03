@@ -3731,6 +3731,17 @@ if (location.hash === '#debug') {
 }
 
 if ('serviceWorker' in navigator) {
+  // A new version taking over mid-session reloads once into it, so a push is
+  // on screen without having to close and reopen the app. Skipped on the
+  // first install, when nothing older was showing.
+  if (navigator.serviceWorker.controller) {
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (reloaded) return;
+      reloaded = true;
+      location.reload();
+    });
+  }
   navigator.serviceWorker.register('./sw.js').catch(() => {});
 }
 

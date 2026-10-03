@@ -9,7 +9,7 @@
  * would fill the phone and serve stale, dead URLs.
  */
 
-const VERSION = 'v20';
+const VERSION = 'v21';
 const SHELL = [
   './',
   './index.html',
@@ -24,7 +24,11 @@ const SHELL = [
 ];
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(VERSION).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));
+  // `reload`, past the browser's own HTTP cache. Pages serves these with ten
+  // minutes of max-age, so a plain addAll right after a push could fill the
+  // NEW cache with the OLD files -- and then serve them until the next push.
+  const fresh = SHELL.map((path) => new Request(path, { cache: 'reload' }));
+  event.waitUntil(caches.open(VERSION).then((cache) => cache.addAll(fresh)).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (event) => {
@@ -39,21 +43,24 @@ self.addEventListener('fetch', (event) => {
   // endpoints, or a signed CDN URL goes straight to the network.
   if (url.origin !== self.location.origin || event.request.method !== 'GET') return;
 
-  // Stale-while-revalidate: the cached copy answers at once -- a launch on a
-  // slow connection used to pay a round trip per file before anything rendered
-  // -- and the network's answer replaces it behind, so an update lands one
-  // open later instead of holding this one up. No signal still means the
-  // cached app, exactly as before.
-  event.respondWith(
-    caches.match(event.request).then((hit) => {
-      const refresh = fetch(event.request).then((res) => {
-        if (res.ok) {
-          const copy = res.clone();
-          caches.open(VERSION).then((cache) => cache.put(event.request, copy));
-        }
-        return res;
-      }).catch(() => hit || caches.match('./index.html'));
-      return hit || refresh;
-    }),
-  );
+  // Network first, asked to revalidate (`no-cache`), so a push shows on the
+  // next load. It was stale-while-revalidate, which always answered with the
+  // cached copy and made every update land one open late -- a refresh showed
+  // the old app however hard it was pressed. Revalidating costs a 304 per file
+  // when nothing changed. A slow or absent network still gets the cached app:
+  // after WAIT the cache answers, and the network's copy is stored behind it.
+  const WAIT = 3000;
+  event.respondWith((async () => {
+    const network = fetch(event.request, { cache: 'no-cache' }).then((res) => {
+      if (res.ok) {
+        const copy = res.clone();
+        caches.open(VERSION).then((cache) => cache.put(event.request, copy));
+      }
+      return res;
+    });
+    const hit = await caches.match(event.request);
+    if (!hit) return network.catch(() => caches.match('./index.html'));
+    const late = new Promise((resolve) => setTimeout(() => resolve(hit), WAIT));
+    return Promise.race([network.catch(() => hit), late]);
+  })());
 });
