@@ -2364,8 +2364,9 @@ function buildLabelChips(video, row) {
   const chips = document.createElement('span');
   chips.className = 'chips';
 
-  // Race first, from the performers credited -- then models, then tags.
-  for (const race of racesOf(record)) {
+  // Race first, from the performers credited -- then models, then tags. In the
+  // player only: on a card in the grid it was one pill too many.
+  for (const race of (row && row.classList.contains('in-player') ? racesOf(record) : [])) {
     const chip = document.createElement('button');
     chip.className = 'chip race';
     paintChip(chip, 'race', race);
@@ -2749,7 +2750,8 @@ function closeLineup() {
 function buildRecordRow(video, { add = false } = {}) {
   const record = recordFor(video);
   const row = document.createElement('div');
-  row.className = 'record';
+  // `add` is only ever set by the player, which is also where race shows.
+  row.className = 'record' + (add ? ' in-player' : '');
 
   const stars = document.createElement('span');
   stars.className = 'stars';
