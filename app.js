@@ -1991,28 +1991,25 @@ async function startShuffle() {
   shuffle.pool = [];
   shuffle.seen = [];
   shuffle.at = -1;
+  shuffle.ahead = null;   // a pick drawn for an earlier run is not this one's
   shuffle.walking = true;
   const skipped = [];
   let seen = 0;
 
   try {
+    // The whole tree first, THEN the draw. It used to start on the first page
+    // that held a match, so the first pick -- and the one drawn ahead of it --
+    // came from that page alone. The walk visits folders in the same order
+    // every time, so a fresh walk kept opening on the same handful of videos,
+    // and under a narrow filter on the very same one. A walk held from an
+    // earlier evening arrives whole and at once, so this costs nothing then;
+    // only a tree never walked before makes you wait, once.
     await shufflePool(run, (videos) => {
       if (shuffle.run !== run) return;
       seen += videos.length;
       shuffle.pool.push(...videos.filter((v) => matchesFilter(v, shuffle.filter)));
-      if (shuffle.on) {
-        // Watching already: the count under the player grows as the rest lands.
-        syncPlayerNav();
-      } else if (shuffle.pool.length) {
-        // The first thing that matches starts the evening. The rest of the tree
-        // keeps arriving behind the player, and the pool grows into it.
-        shuffle.on = true;
-        $('#shuffle').hidden = true;
-        syncShuffleBadge();
-        shuffleStep(1);
-      } else {
-        $('#shuffleSummary').textContent = `Looking… ${seen} so far`;
-      }
+      $('#shuffleSummary').textContent =
+        `Looking… ${seen.toLocaleString()} so far, ${shuffle.pool.length.toLocaleString()} match`;
     }, skipped);
     if (shuffle.run !== run) return;
     shuffle.walking = false;
@@ -2021,12 +2018,17 @@ async function startShuffle() {
         ? `Skipped ${skipped[0]} — OneDrive would not list it`
         : `Skipped ${skipped.length} folders OneDrive would not list`, 'err');
     }
-    if (!shuffle.on) {
+    if (!shuffle.pool.length) {
       $('#shuffleSummary').textContent = seen
         ? `Nothing here matches — ${seen} videos, none of them`
         : `No videos under ${shuffle.dirs.size > 1 ? 'those folders' : 'this folder'}`;
       return;
     }
+    // Every match is in the pool, so every one is equally likely.
+    shuffle.on = true;
+    $('#shuffle').hidden = true;
+    syncShuffleBadge();
+    shuffleStep(1);
     syncPlayerNav();
   } catch (err) {
     if (shuffle.run !== run) return;
