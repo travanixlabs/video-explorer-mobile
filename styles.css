@@ -633,6 +633,13 @@ body.selecting .tick { opacity: 1; }
 }
 .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
 
+/* A colour from the desktop's Settings, worn over the default chip colours. */
+.chip[style*="--chip-colour"] {
+  border-color: var(--chip-colour) !important;
+  background: color-mix(in srgb, var(--chip-colour) 20%, transparent) !important;
+  color: color-mix(in srgb, var(--chip-colour) 72%, white) !important;
+}
+
 /* The label sheet's picks, each with a cross big enough for a thumb. */
 .label-picked { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 8px; }
 .label-picked[hidden] { display: none; }

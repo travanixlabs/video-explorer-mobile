@@ -457,6 +457,14 @@ async function readLibrary() {
     }).catch(() => {});
     // And the preview cache's geometry, without which a strip cannot be named.
     graph.veJson('cache/manifest.json').then((geom) => { state.geom = geom; }).catch(() => {});
+    // The desktop's Settings colours. Late is fine: the grid repaints once
+    // they land, and until then chips wear the stylesheet's defaults.
+    graph.veJson('cache/colours.json').then((colours) => {
+      if (!colours) return;
+      state.colours = colours;
+      render();
+      if (!$('#labels').hidden) renderLabelSuggestions();
+    }).catch(() => {});
     return true;
   } catch (err) {
     state.libraryLoaded = false;
@@ -2308,6 +2316,22 @@ const LABEL_FIELDS = [
   { field: 'tags', chip: 'chip' },
 ];
 
+/**
+ * The colour Settings on the desktop gave a chip, or '' for the default: a tag
+ * by its own name, a performer by the one colour all performers share.
+ */
+function chipColour(field, value) {
+  const colours = state.colours || {};
+  if (field === 'tags') return (colours.labels || {})[String(value).toLowerCase()] || '';
+  return (colours.facets || {})[field] || '';
+}
+
+function paintChip(el, field, value) {
+  const colour = chipColour(field, value);
+  if (colour) el.style.setProperty('--chip-colour', colour);
+  return el;
+}
+
 function buildLabelChips(video, row) {
   const record = recordFor(video);
   const chips = document.createElement('span');
@@ -2317,6 +2341,7 @@ function buildLabelChips(video, row) {
     for (const value of valuesOf(record, spec.field)) {
       const chip = document.createElement('button');
       chip.className = spec.chip;
+      paintChip(chip, spec.field, value);
       chip.textContent = value;
       chip.title = value;
       chip.addEventListener('click', (ev) => {
@@ -2450,6 +2475,7 @@ function renderLabelSuggestions() {
     for (const name of labelDraft[field]) {
       const pill = document.createElement('span');
       pill.className = spec.chip + ' has-x';
+      paintChip(pill, field, name);
       const text = document.createElement('span');
       text.className = 'chip-text';
       text.textContent = name;
@@ -2484,6 +2510,7 @@ function renderLabelSuggestions() {
     for (const entry of want ? found : found.slice(0, 60)) {
       const chip = document.createElement('button');
       chip.className = spec.chip;
+      paintChip(chip, field, entry.tag);
       chip.textContent = `${entry.tag} · ${entry.count}`;
       chip.addEventListener('click', () => {
         draftAdd(field, entry.tag);
