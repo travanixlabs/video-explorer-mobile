@@ -632,6 +632,13 @@ body.selecting .tick { opacity: 1; }
   cursor: pointer;
 }
 .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* The player's +: as small as a chip gets, and quieter than the labels. */
+.chip.chip-add { border-style: dashed; color: var(--text-faint); padding-left: 9px; padding-right: 9px; }
+
+/* The sheet's stars, big enough for a thumb. */
+.label-rating { display: flex; align-items: center; gap: 4px; }
+.label-rating .star { font-size: 24px; padding: 2px 4px; }
 .chip.on {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 24%, transparent);
@@ -843,3 +850,7 @@ body.selecting .tick { opacity: 1; }
 
 /* The model search in the filter sheet sits under the names already picked. */
 .adv-find { width: 100%; margin: 6px 0 4px; }
+
+/* The label sheet opens from the player's + as well as the selection bar, so
+   it has to sit above the player (90) and its overlays (95), under toasts. */
+#labels { z-index: 100; }

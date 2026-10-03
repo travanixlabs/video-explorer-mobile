@@ -2369,6 +2369,27 @@ function buildFolderLine(video) {
  */
 let labelTargets = [];
 
+/** The rating the sheet will save; null means leave each video's alone. */
+let labelRating = null;
+
+function renderLabelRating() {
+  const box = $('#labelRating');
+  if (!box) return;
+  box.innerHTML = '';
+  const now = labelRating || 0;
+  for (let n = 1; n <= 5; n += 1) {
+    const star = document.createElement('button');
+    star.className = 'star' + (n <= now ? ' on' : '');
+    star.textContent = n <= now ? '\u2605' : '\u2606';
+    star.addEventListener('click', () => {
+      labelRating = n === now ? 0 : n;
+      renderLabelRating();
+    });
+    box.appendChild(star);
+  }
+  if (labelRating === null) box.insertAdjacentHTML('beforeend', '<span class="dim">unchanged</span>');
+}
+
 function openLabels(videos) {
   if (!videos.length) return;
   labelTargets = videos;
@@ -2385,6 +2406,9 @@ function openLabels(videos) {
   const first = recordFor(videos[0]);
   $('#labelTags').value = single ? (first.tags || []).join(', ') : '';
   $('#labelModels').value = single ? (first.models || []).join(', ') : '';
+  labelRating = single ? (Number(first.rating) || 0) : null;
+  renderLabelRating();
+
   renderLabelSuggestions();
   $('#labels').hidden = false;
 }
@@ -2459,19 +2483,25 @@ function commitLabels(mode) {
   const videos = labelTargets;
   $('#labels').hidden = true;
 
+  const rating = labelRating === null ? {} : { rating: labelRating };
   for (const video of videos) {
     const record = recordFor(video);
     const patch = mode === 'replace'
-      ? { tags, models }
+      ? { tags, models, ...rating }
       : {
         tags: [...(record.tags || []), ...tags],
         models: [...(record.models || []), ...models],
+        ...rating,
       };
     editRecord(video, patch);
   }
 
   const before = playerList();
   render();
+  // The player's own row shows what was just saved, rather than what was
+  // there when it opened.
+  const open = !$('#player').hidden && videos.find((v) => v.id === state.playingId);
+  if (open) renderPlayerDetails(open);
   followListing(before);
   const n = videos.length;
   toast(mode === 'replace'
@@ -2609,7 +2639,7 @@ function closeLineup() {
   $('#lineup').hidden = true;
 }
 
-function buildRecordRow(video) {
+function buildRecordRow(video, { add = false } = {}) {
   const record = recordFor(video);
   const row = document.createElement('div');
   row.className = 'record';
@@ -2624,14 +2654,26 @@ function buildRecordRow(video) {
       ev.stopPropagation();
       const before = playerList();
       editRecord(video, { rating: n === record.rating ? 0 : n });
-      row.replaceWith(buildRecordRow(video));
+      row.replaceWith(buildRecordRow(video, { add }));
       if (advActive()) { render(); followListing(before); }
     });
     stars.appendChild(star);
   }
   row.appendChild(stars);
 
-  row.appendChild(buildLabelChips(video, row));
+  const chips = buildLabelChips(video, row);
+  // Only in the player: there you are looking at one video and naming it is
+  // the obvious next thing. On a card in a grid of hundreds it was a target
+  // hit by accident far more than on purpose, which is why it went.
+  if (add) {
+    const plus = document.createElement('button');
+    plus.className = 'chip chip-add';
+    plus.textContent = '+';
+    plus.title = 'Models, tags and rating';
+    plus.addEventListener('click', (ev) => { ev.stopPropagation(); openLabels([video]); });
+    chips.appendChild(plus);
+  }
+  row.appendChild(chips);
   return row;
 }
 
@@ -3106,7 +3148,7 @@ function renderPlayerDetails(video) {
   meta.className = 'meta';
   meta.textContent = bits.join('  ·  ');
   box.appendChild(meta);
-  box.appendChild(buildRecordRow(video));
+  box.appendChild(buildRecordRow(video, { add: true }));
   const faces = buildSuggestions(video);
   if (faces) box.appendChild(faces);
 }
