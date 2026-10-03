@@ -633,6 +633,9 @@ body.selecting .tick { opacity: 1; }
 }
 .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
 
+/* Race: violet until the desktop's Settings says otherwise. */
+.chip.race { border-color: #6a4f8c; background: #241c30; color: #cfb4f0; }
+
 /* A colour from the desktop's Settings, worn over the default chip colours. */
 .chip[style*="--chip-colour"] {
   border-color: var(--chip-colour) !important;

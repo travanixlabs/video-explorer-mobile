@@ -1426,8 +1426,26 @@ function newAdvFilter() {
     // Per facet: "all of these tags" and "any of these performers" is a
     // reasonable pair to ask for. Exclusions are always all-of, since "not
     // this" means not this either way.
-    mode: { tags: 'all', models: 'all' },
+    mode: { tags: 'all', models: 'all', race: 'all' },
+    race: new Map(),
   };
+}
+
+/**
+ * Race, as labelled per performer on the desktop -- four answers. Nothing
+ * works it out: every video credited to a performer carries hers, so a video
+ * has as many races as it has labelled performers.
+ */
+const RACES = ['Asian', 'Black', 'White', 'Other'];
+
+function racesOf(record) {
+  const map = state.library.races || {};
+  const have = new Set();
+  for (const name of record.models || []) {
+    const race = map[String(name).trim().toLowerCase()];
+    if (race) have.add(race);
+  }
+  return RACES.filter((r) => have.has(r));
 }
 
 
@@ -1437,13 +1455,13 @@ function newAdvFilter() {
  */
 const NOTHING = '\u0000';
 
-const FACETS = ['tags', 'models', 'ratings'];
+const FACETS = ['tags', 'models', 'ratings', 'race'];
 
 let adv = newAdvFilter();
 let advDraft = newAdvFilter();
 
 function advActive(f = adv) {
-  return FACETS.some((name) => f[name].size > 0);
+  return FACETS.some((name) => f[name] && f[name].size > 0);
 }
 
 /** The values a facet requires, or excludes. The emptiness chip is not a value. */
@@ -1490,9 +1508,10 @@ function matchesFilter(video, f) {
     if (barred.includes(rating)) return false;
   }
 
-  for (const field of ['tags', 'models']) {
+  for (const field of ['race', 'tags', 'models']) {
     if (!f[field] || !f[field].size) continue;
-    const have = new Set(valuesOf(record, field).map((t) => String(t).toLowerCase()));
+    const held = field === 'race' ? racesOf(record) : valuesOf(record, field);
+    const have = new Set(held.map((t) => String(t).toLowerCase()));
 
     // "Has none at all" is its own question, asked before any value is compared.
     const nothing = f[field].get(NOTHING);
@@ -1532,7 +1551,22 @@ function openAdv() {
   renderAdv();
 }
 
+/** A race row: four answers and "no race", picked first, cycling as tags do. */
+function renderRaceRow(host, facet, redraw) {
+  if (!host) return;
+  host.innerHTML = '';
+  const rank = (r) => (facet.get(r) === 'in' ? 0 : facet.get(r) === 'out' ? 1 : 2);
+  const order = RACES.map((r, i) => [r, i]).sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]);
+  for (const [race] of order) {
+    host.appendChild(advChip(race, facet.get(race), () => { cycleIn(facet, race); redraw(); }));
+  }
+  const gap = advChip('no race', facet.get(NOTHING), () => { cycleIn(facet, NOTHING); redraw(); });
+  gap.classList.add('none');
+  host.appendChild(gap);
+}
+
 function renderAdv() {
+  renderRaceRow($('#advRace'), advDraft.race, () => renderAdv());
   const ratings = $('#advRating');
   ratings.innerHTML = '';
   for (const value of [0, 1, 2, 3, 4, 5]) {
@@ -1593,6 +1627,7 @@ function renderAdv() {
 
   $('#advTagMode').textContent = advDraft.mode.tags;
   $('#advModelMode').textContent = advDraft.mode.models;
+  $('#advRaceMode').textContent = advDraft.mode.race || 'all';
 
   const bits = [];
   const say = (field, one, many = one + 's') => {
@@ -1604,6 +1639,7 @@ function renderAdv() {
     if (nothing === 'in') bits.push(`no ${many} at all`);
     if (nothing === 'out') bits.push(`some ${many}`);
   };
+  say('race', 'race', 'races');
   say('models', 'model');
   say('tags', 'tag');
   say('ratings', 'rating');
@@ -1755,37 +1791,20 @@ function openShuffle() {
   shuffle.draft = newAdvFilter();
   if (shuffle.filter) {
     shuffle.draft.mode = { ...shuffle.filter.mode };
-    for (const facet of ['tags', 'ratings']) {
-      shuffle.draft[facet] = new Map(shuffle.filter[facet]);
+    for (const facet of ['race', 'tags', 'ratings']) {
+      shuffle.draft[facet] = new Map(shuffle.filter[facet] || []);
     }
   }
-  shuffle.draftDirs = new Set(shuffle.dirs);
+  // No folder picking any more: a shuffle draws from the folder you are in.
+  shuffle.draftDirs = new Set();
   $('#shuffle').hidden = false;
   renderShuffle();
-  // The row fills in when the listing lands, without holding the sheet shut.
-  loadShuffleRoots().then(() => {
-    if (!$('#shuffle').hidden) renderShuffle();
-  });
-}
-
-function renderShuffleDirs() {
-  const roots = shuffleRoots || [];
-  $('#shuffleDirsLabel').hidden = !roots.length;
-  $('#shuffleDirs').hidden = !roots.length;
-  const box = $('#shuffleDirs');
-  box.innerHTML = '';
-  for (const root of roots) {
-    // Picked or not -- there is no "everything but Folder 3" worth a third state.
-    box.appendChild(advChip(root.name, shuffle.draftDirs.has(root.id) ? 'in' : '', () => {
-      if (!shuffle.draftDirs.delete(root.id)) shuffle.draftDirs.add(root.id);
-      renderShuffle();
-    }));
-  }
-  $('#shuffleWhere').textContent = shuffleWhere();
 }
 
 function renderShuffle() {
-  renderShuffleDirs();
+  $('#shuffleWhere').textContent = shuffleWhere();
+  renderRaceRow($('#shuffleRace'), shuffle.draft.race, () => renderShuffle());
+  $('#shuffleRaceMode').textContent = shuffle.draft.mode.race || 'all';
   const ratings = $('#shuffleRating');
   ratings.innerHTML = '';
   for (const value of [0, 1, 2, 3, 4, 5]) {
@@ -1814,7 +1833,7 @@ function renderShuffle() {
   $('#shuffleTagMode').textContent = shuffle.draft.mode.tags;
 
   const bits = [];
-  for (const [facet, one, many] of [['tags', 'tag', 'tags'], ['ratings', 'rating', 'ratings']]) {
+  for (const [facet, one, many] of [['race', 'race', 'races'], ['tags', 'tag', 'tags'], ['ratings', 'rating', 'ratings']]) {
     const inn = picked(shuffle.draft[facet], 'in').length;
     const out = picked(shuffle.draft[facet], 'out').length;
     if (inn) bits.push(`${inn} ${inn === 1 ? one : many}`);
@@ -2083,8 +2102,16 @@ function syncShuffleBadge() {
  * search box, which left the filter panel describing something else.
  */
 function filterByLabel(field, value) {
-  adv = newAdvFilter();
-  adv[field].set(value, 'in');
+  // Its own facet is replaced; the others stay. A race pill tapped under a
+  // rating filter means those, of that race -- not a fresh start.
+  const next = { ...adv, mode: { ...adv.mode } };
+  for (const [key, held] of Object.entries(adv)) {
+    if (held instanceof Map) next[key] = new Map(held);
+  }
+  if (!next[field]) next[field] = new Map();
+  next[field].clear();
+  next[field].set(value, 'in');
+  adv = next;
   advDraft = newAdvFilter();
   $('#search').value = '';
   state.query = '';
@@ -2336,6 +2363,20 @@ function buildLabelChips(video, row) {
   const record = recordFor(video);
   const chips = document.createElement('span');
   chips.className = 'chips';
+
+  // Race first, from the performers credited -- then models, then tags.
+  for (const race of racesOf(record)) {
+    const chip = document.createElement('button');
+    chip.className = 'chip race';
+    paintChip(chip, 'race', race);
+    chip.textContent = race;
+    chip.title = race;
+    chip.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      filterByLabel('race', race);
+    });
+    chips.appendChild(chip);
+  }
 
   for (const spec of LABEL_FIELDS) {
     for (const value of valuesOf(record, spec.field)) {
@@ -3679,7 +3720,7 @@ async function boot() {
   $('#advReset').addEventListener('click', () => {
     resetAdv();
   });
-  for (const [field, id] of [['tags', '#advTagMode'], ['models', '#advModelMode']]) {
+  for (const [field, id] of [['race', '#advRaceMode'], ['tags', '#advTagMode'], ['models', '#advModelMode']]) {
     $(id).addEventListener('click', () => {
       advDraft.mode[field] = advDraft.mode[field] === 'all' ? 'any' : 'all';
       renderAdv();
@@ -3699,8 +3740,8 @@ async function boot() {
     shuffle.draftDirs.clear();
     renderShuffle();
   });
-  $('#shuffleDirsClear').addEventListener('click', () => {
-    shuffle.draftDirs.clear();
+  $('#shuffleRaceMode').addEventListener('click', () => {
+    shuffle.draft.mode.race = shuffle.draft.mode.race === 'any' ? 'all' : 'any';
     renderShuffle();
   });
   $('#shuffleTagMode').addEventListener('click', () => {

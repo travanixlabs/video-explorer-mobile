@@ -91,6 +91,9 @@
     <div class="adv-body">
       <p class="adv-how">Tap once to require, twice to exclude, three times to clear.</p>
 
+      <div class="adv-label">Race <button id="advRaceMode" class="mode">all</button></div>
+      <div id="advRace" class="chip-row"></div>
+
       <div class="adv-label">Models <button id="advModelMode" class="mode">all</button></div>
       <div id="advModels" class="chip-row"></div>
       <input id="advModelsFind" type="search" class="search adv-find" placeholder="search a name to add"
@@ -127,13 +130,8 @@
     <div class="adv-body">
       <p class="adv-how" id="shuffleWhere"></p>
 
-      <!-- Where, before what: picking a library folder here overrides the one
-           you are standing in, so an evening can span Folder 1 and Folder 4
-           without navigating anywhere first. -->
-      <div class="adv-label" id="shuffleDirsLabel" hidden>
-        Folders <button id="shuffleDirsClear" class="mode">clear</button>
-      </div>
-      <div id="shuffleDirs" class="chip-row" hidden></div>
+      <div class="adv-label">Race <button id="shuffleRaceMode" class="mode">all</button></div>
+      <div id="shuffleRace" class="chip-row"></div>
 
       <div class="adv-label">Tags <button id="shuffleTagMode" class="mode">all</button></div>
       <div id="shuffleTags" class="chip-row"></div>
