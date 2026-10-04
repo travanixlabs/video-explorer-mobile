@@ -3186,41 +3186,6 @@ function stopPreview() {
   preview.timer = null;
 }
 
-/**
- * Where a video should start, and what is worth writing back -- the same two
- * rules the desktop uses, so the two devices agree about what "watched" means.
- * The first half-minute is not worth resuming into; within 45 seconds of the
- * end counts as finished and clears the stored point; and a point is only
- * written when it says something ten seconds newer than what is stored --
- * every save here uploads the whole labels file.
- */
-function resumeAt(record, duration) {
-  const at = Number(record && record.resume) || 0;
-  if (at < 30) return 0;
-  if (duration > 0 && at > duration - 45) return 0;
-  return at;
-}
-
-function resumeToKeep(current, duration, had) {
-  const done = duration > 0 && current > duration - 45;
-  if (done || current < 30) return had ? 0 : null;
-  if (Math.abs(current - had) < 10) return null;
-  return Math.round(current);
-}
-
-function saveResume() {
-  const el = $('#playerVideo');
-  if (!el || !el.controls || !state.playingId) return;
-  const video = (shuffle.on ? shuffle.pool : playerList())
-    .find((v) => v.id === state.playingId);
-  if (!video) return;
-  const record = recordFor(video);
-  const keep = resumeToKeep(Number(el.currentTime) || 0,
-    Number(el.duration) || video.duration || 0, record.resume || 0);
-  if (keep === null) return;
-  editRecord(video, { resume: keep });
-}
-
 /** The button turns the preview into a real playthrough, from the top. */
 function beginPlayback() {
   stopPreview();
@@ -3229,18 +3194,7 @@ function beginPlayback() {
   $('#playerBadge').hidden = true;
   el.controls = true;
   el.muted = !soundOn;
-  // Picking up where any device left off; the offer to start over rides the
-  // toast, so carrying on costs nothing.
-  const video = (shuffle.on ? shuffle.pool : playerList())
-    .find((v) => v.id === state.playingId);
-  const back = video ? resumeAt(recordFor(video), Number(el.duration) || video.duration || 0) : 0;
-  try { el.currentTime = back; } catch { /* not seekable yet; it starts at 0 anyway */ }
-  if (back) {
-    toast(`Resumed at ${fmtTime(back)}`, 'ok', {
-      label: 'Start over',
-      run: () => { try { $('#playerVideo').currentTime = 0; } catch { /* fine */ } },
-    });
-  }
+  try { el.currentTime = 0; } catch { /* not seekable yet; it starts at 0 anyway */ }
   el.play().catch(() => {});
 }
 
@@ -3627,7 +3581,6 @@ function syncAutoButton() {
 
 function closePlayer() {
   stopPreview(); // a timer left running would seek a src that has gone
-  saveResume();  // where you stood, before the element forgets it
   const el = $('#playerVideo');
   el.pause();
   el.removeAttribute('src');
@@ -3672,11 +3625,7 @@ async function boot() {
     toast(autoNext ? 'Autoplay on' : 'Autoplay off', 'ok');
   });
   syncAutoButton();
-  // The position outlives a pause and the end -- and the end may hand over to
-  // the next video.
-  $('#playerVideo').addEventListener('pause', () => saveResume());
   $('#playerVideo').addEventListener('ended', () => {
-    saveResume();
     if (autoNext) playSibling(1);
   });
   attachPlayerSwipe();
