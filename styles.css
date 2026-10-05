@@ -400,6 +400,14 @@ main { padding: 0 12px 40px; }
 }
 .star.on { color: #f5b52b; }
 
+/* Half a star: the filled glyph, gold on its left half only. */
+.star.half {
+  background: linear-gradient(90deg, #f5b52b 50%, var(--text-faint) 50%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
 .meta {
   padding: 2px 11px 0;
   font-size: 11.5px;

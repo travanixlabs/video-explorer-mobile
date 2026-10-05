@@ -442,10 +442,71 @@ function editRecord(video, patch) {
 const RATING_MAX = 10;
 const RATING_VALUES = Array.from({ length: RATING_MAX + 1 }, (_, n) => n);
 
-/** A rating as a filter chip: a number, since eleven rows of stars will not fit. */
+/** A rating as a filter chip: 7 reads "3½★". */
 function ratingChipLabel(value) {
-  return value === 0 ? 'unrated' : `${value}\u2605`;
+  return value === 0 ? 'unrated' : `${starsNumber(value)}\u2605`;
 }
+
+/** A stored rating (0-10) as stars: 7 is 3½. */
+function starsText(rating) {
+  const r = Math.max(0, Math.min(RATING_MAX, Math.round(Number(rating) || 0)));
+  return '\u2605'.repeat(Math.floor(r / 2)) + (r % 2 ? '\u00BD' : '');
+}
+
+/** A stored rating as a number of stars, for labels: 7 is "3½". */
+function starsNumber(rating) {
+  const r = Math.round(Number(rating) || 0);
+  const whole = Math.floor(r / 2);
+  return r % 2 ? `${whole || ''}\u00BD` : String(whole);
+}
+
+/** Lights a row of five for a value: whole stars, then a half if it is odd. */
+function paintStarRow(wrap, value) {
+  wrap.querySelectorAll('.star').forEach((star, i) => {
+    const full = value >= (i + 1) * 2;
+    const half = !full && value === i * 2 + 1;
+    star.classList.toggle('on', full);
+    star.classList.toggle('half', half);
+    star.textContent = full || half ? '\u2605' : '\u2606';
+  });
+}
+
+/**
+ * Five stars, each worth two steps: the left half of a star is the half, the
+ * right half the whole. Hovering previews where a click would land; clicking
+ * the rating already held clears it.
+ */
+function buildStarRow(current, onPick, className = 'stars') {
+  const wrap = document.createElement('span');
+  wrap.className = className;
+  const at = (star, ev) => {
+    const box = star.getBoundingClientRect();
+    const i = Number(star.dataset.n);
+    return ev.clientX - box.left < box.width / 2 ? i * 2 - 1 : i * 2;
+  };
+  for (let i = 1; i <= RATING_MAX / 2; i += 1) {
+    const star = document.createElement('button');
+    star.type = 'button';
+    star.className = 'star';
+    star.dataset.n = String(i);
+    star.addEventListener('pointermove', (ev) => {
+      const v = at(star, ev);
+      paintStarRow(wrap, v);
+      star.title = v === current ? 'Clear rating' : `Rate ${starsNumber(v)}`;
+    });
+    star.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      ev.preventDefault();
+      const v = at(star, ev);
+      onPick(v === current ? 0 : v);
+    });
+    wrap.appendChild(star);
+  }
+  wrap.addEventListener('pointerleave', () => paintStarRow(wrap, current));
+  paintStarRow(wrap, current);
+  return wrap;
+}
+
 
 /**
  * The same once-only move the desktop makes when it opens the file: a library
@@ -1304,18 +1365,12 @@ function updateSelectionBar() {
   const uniform = picked.every((v) => (recordFor(v).rating || 0) === first);
   const stars = $('#selStars');
   stars.innerHTML = '';
-  for (let n = 1; n <= RATING_MAX; n += 1) {
-    const star = document.createElement('button');
-    star.className = 'star' + (uniform && n <= first ? ' on' : '');
-    star.textContent = uniform && n <= first ? '★' : '☆';
-    star.addEventListener('click', () => {
-      const rating = (uniform && n === first) ? 0 : n;
-      for (const video of picked) editRecord(video, { rating });
-      render();
-      updateSelectionBar();
-    });
-    stars.appendChild(star);
-  }
+  const row = buildStarRow(uniform ? first : 0, (rating) => {
+    for (const video of picked) editRecord(video, { rating });
+    render();
+    updateSelectionBar();
+  });
+  stars.appendChild(row);
 }
 
 function tagSelection() {
@@ -2471,17 +2526,10 @@ function renderLabelRating() {
   const box = $('#labelRating');
   if (!box) return;
   box.innerHTML = '';
-  const now = labelRating || 0;
-  for (let n = 1; n <= RATING_MAX; n += 1) {
-    const star = document.createElement('button');
-    star.className = 'star' + (n <= now ? ' on' : '');
-    star.textContent = n <= now ? '\u2605' : '\u2606';
-    star.addEventListener('click', () => {
-      labelRating = n === now ? 0 : n;
-      renderLabelRating();
-    });
-    box.appendChild(star);
-  }
+  box.appendChild(buildStarRow(labelRating || 0, (n) => {
+    labelRating = n;
+    renderLabelRating();
+  }));
   if (labelRating === null) box.insertAdjacentHTML('beforeend', '<span class="dim">unchanged</span>');
 }
 
@@ -2781,22 +2829,12 @@ function buildRecordRow(video, { add = false } = {}) {
   // `add` is only ever set by the player, which is also where race shows.
   row.className = 'record' + (add ? ' in-player' : '');
 
-  const stars = document.createElement('span');
-  stars.className = 'stars';
-  for (let n = 1; n <= RATING_MAX; n += 1) {
-    const star = document.createElement('button');
-    star.className = 'star' + (n <= (record.rating || 0) ? ' on' : '');
-    star.textContent = n <= (record.rating || 0) ? '★' : '☆';
-    star.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      const before = playerList();
-      editRecord(video, { rating: n === record.rating ? 0 : n });
-      row.replaceWith(buildRecordRow(video, { add }));
-      if (advActive()) { render(); followListing(before); }
-    });
-    stars.appendChild(star);
-  }
-  row.appendChild(stars);
+  row.appendChild(buildStarRow(record.rating || 0, (rating) => {
+    const before = playerList();
+    editRecord(video, { rating });
+    row.replaceWith(buildRecordRow(video, { add }));
+    if (advActive()) { render(); followListing(before); }
+  }));
 
   const chips = buildLabelChips(video, row);
   // Only in the player: there you are looking at one video and naming it is
