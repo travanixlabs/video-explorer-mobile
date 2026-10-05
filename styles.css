@@ -400,6 +400,17 @@ main { padding: 0 12px 40px; }
 }
 .star.on { color: #f5b52b; }
 
+/* A rating read out: whole stars, and a half one drawn as the star with only
+   its left half gold. */
+.star-run { display: inline-flex; color: #f5b52b; letter-spacing: 0; }
+.star-run .sr.half {
+  background: linear-gradient(90deg, #f5b52b 50%, rgba(255, 255, 255, .28) 50%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  text-shadow: none;
+}
+
 /* Half a star: the filled glyph, gold on its left half only. */
 .star.half {
   background: linear-gradient(90deg, #f5b52b 50%, var(--text-faint) 50%);

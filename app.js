@@ -442,22 +442,31 @@ function editRecord(video, patch) {
 const RATING_MAX = 10;
 const RATING_VALUES = Array.from({ length: RATING_MAX + 1 }, (_, n) => n);
 
-/** A rating as a filter chip: 7 reads "3½★". */
+/** A rating as a filter chip: its stars, half one and all. */
 function ratingChipLabel(value) {
-  return value === 0 ? 'unrated' : `${starsNumber(value)}\u2605`;
+  return value === 0 ? 'unrated' : starsNode(value);
 }
 
-/** A stored rating (0-10) as stars: 7 is 3½. */
-function starsText(rating) {
+/**
+ * A stored rating (0-10) drawn as stars: 7 is three whole stars and a half
+ * one -- the star glyph with only its left half gold.
+ */
+function starsNode(rating) {
   const r = Math.max(0, Math.min(RATING_MAX, Math.round(Number(rating) || 0)));
-  return '\u2605'.repeat(Math.floor(r / 2)) + (r % 2 ? '\u00BD' : '');
+  const run = document.createElement('span');
+  run.className = 'star-run';
+  for (let i = 1; i <= Math.ceil(r / 2); i += 1) {
+    const star = document.createElement('span');
+    star.className = 'sr' + (r >= i * 2 ? '' : ' half');
+    star.textContent = '\u2605';
+    run.appendChild(star);
+  }
+  return run;
 }
 
-/** A stored rating as a number of stars, for labels: 7 is "3½". */
+/** A stored rating as a number of stars, for tooltips: 7 is "3.5". */
 function starsNumber(rating) {
-  const r = Math.round(Number(rating) || 0);
-  const whole = Math.floor(r / 2);
-  return r % 2 ? `${whole || ''}\u00BD` : String(whole);
+  return String((Math.round(Number(rating) || 0)) / 2);
 }
 
 /** Lights a row of five for a value: whole stars, then a half if it is odd. */
@@ -1754,7 +1763,8 @@ function renderAdvModelsFound() {
 function advChip(label, mode, onClick) {
   const chip = document.createElement('button');
   chip.className = 'chip tri' + (mode === 'in' ? ' in' : mode === 'out' ? ' out' : '');
-  chip.textContent = label;
+  if (typeof label === 'string') chip.textContent = label;
+  else chip.appendChild(label);
   chip.addEventListener('click', onClick);
   return chip;
 }
