@@ -1388,9 +1388,8 @@ function applyCardWidth() {
  * of threes adds up to one good video. A two or a one is a verdict against and
  * scores nothing, same as never having rated it.
  */
-// Ten stars since the scale doubled: what were 3, 4 and 5 are 6, 8 and 10, at
-// the same weights, and the odd steps sit halfway between their neighbours.
-const STAR_POINTS = [0, 0, 0, 0, 0, 3, 10, 32, 100, 316, 1000];
+// Points per rating, unrated to ten stars.
+const STAR_POINTS = [0, 5, 10, 25, 50, 75, 100, 250, 500, 750, 1000];
 
 /**
  * Favourite performers, beside the records rather than inside them.
