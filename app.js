@@ -438,9 +438,34 @@ function editRecord(video, patch) {
  * signal cannot cost you the ratings. `state.library` stays whatever it was, so
  * a retry that succeeds mid-session simply picks up.
  */
+// Ratings run 0 (unrated) to 10. They ran to 5 until 2026-10-05.
+const RATING_MAX = 10;
+const RATING_VALUES = Array.from({ length: RATING_MAX + 1 }, (_, n) => n);
+
+/** A rating as a filter chip: a number, since eleven rows of stars will not fit. */
+function ratingChipLabel(value) {
+  return value === 0 ? 'unrated' : `${value}\u2605`;
+}
+
+/**
+ * The same once-only move the desktop makes when it opens the file: a library
+ * that does not say it is out of ten is out of five, so every rating doubles
+ * and the file is marked. Normally the PC has done it already and this finds
+ * nothing to do; if the phone gets there first, its next save carries it.
+ */
+function toTenStars(library) {
+  if (!library || !library.records || library.ratingScale === RATING_MAX) return library;
+  for (const record of Object.values(library.records)) {
+    const was = Math.round(Number(record.rating) || 0);
+    if (was > 0) record.rating = Math.min(RATING_MAX, was * 2);
+  }
+  library.ratingScale = RATING_MAX;
+  return library;
+}
+
 async function readLibrary() {
   try {
-    state.library = await graph.loadLibrary();
+    state.library = toTenStars(await graph.loadLibrary());
     state.libraryLoaded = true;
     graph.noteLoaded(state.library);
     // A read that only succeeded on the second attempt has cards on screen
@@ -1018,7 +1043,7 @@ function buildModelGroups(list, mode = 'models') {
       ? facesFor(video).suggested.filter((s) => s.score >= FACE_FLOOR).map((s) => s.name)
       : (record.models || [])).map((n) => String(n).trim()).filter(Boolean);
     if (!names.length) { unnamed.push(video); continue; }
-    const rating = Math.max(0, Math.min(5, Math.round(Number(record.rating) || 0)));
+    const rating = Math.max(0, Math.min(RATING_MAX, Math.round(Number(record.rating) || 0)));
     for (const name of names) {
       const key = name.toLowerCase();
       let group = groups.get(key);
@@ -1028,7 +1053,7 @@ function buildModelGroups(list, mode = 'models') {
       }
       group.files.push(video);
       group.points += STAR_POINTS[rating];
-      if (rating >= 4) group.good += 1;
+      if (rating >= 8) group.good += 1;
     }
   }
 
@@ -1279,7 +1304,7 @@ function updateSelectionBar() {
   const uniform = picked.every((v) => (recordFor(v).rating || 0) === first);
   const stars = $('#selStars');
   stars.innerHTML = '';
-  for (let n = 1; n <= 5; n += 1) {
+  for (let n = 1; n <= RATING_MAX; n += 1) {
     const star = document.createElement('button');
     star.className = 'star' + (uniform && n <= first ? ' on' : '');
     star.textContent = uniform && n <= first ? '★' : '☆';
@@ -1363,7 +1388,9 @@ function applyCardWidth() {
  * of threes adds up to one good video. A two or a one is a verdict against and
  * scores nothing, same as never having rated it.
  */
-const STAR_POINTS = [0, 0, 0, 10, 100, 1000];
+// Ten stars since the scale doubled: what were 3, 4 and 5 are 6, 8 and 10, at
+// the same weights, and the odd steps sit halfway between their neighbours.
+const STAR_POINTS = [0, 0, 0, 0, 0, 3, 10, 32, 100, 316, 1000];
 
 /**
  * Favourite performers, beside the records rather than inside them.
@@ -1569,9 +1596,9 @@ function renderAdv() {
   renderRaceRow($('#advRace'), advDraft.race, () => renderAdv());
   const ratings = $('#advRating');
   ratings.innerHTML = '';
-  for (const value of [0, 1, 2, 3, 4, 5]) {
+  for (const value of RATING_VALUES) {
     ratings.appendChild(advChip(
-      value === 0 ? 'unrated' : '★'.repeat(value),
+      ratingChipLabel(value),
       advDraft.ratings.get(value),
       () => { cycleIn(advDraft.ratings, value); renderAdv(); },
     ));
@@ -1807,9 +1834,9 @@ function renderShuffle() {
   $('#shuffleRaceMode').textContent = shuffle.draft.mode.race || 'all';
   const ratings = $('#shuffleRating');
   ratings.innerHTML = '';
-  for (const value of [0, 1, 2, 3, 4, 5]) {
+  for (const value of RATING_VALUES) {
     ratings.appendChild(advChip(
-      value === 0 ? 'unrated' : '★'.repeat(value),
+      ratingChipLabel(value),
       shuffle.draft.ratings.get(value),
       () => { cycleIn(shuffle.draft.ratings, value); renderShuffle(); },
     ));
@@ -2446,7 +2473,7 @@ function renderLabelRating() {
   if (!box) return;
   box.innerHTML = '';
   const now = labelRating || 0;
-  for (let n = 1; n <= 5; n += 1) {
+  for (let n = 1; n <= RATING_MAX; n += 1) {
     const star = document.createElement('button');
     star.className = 'star' + (n <= now ? ' on' : '');
     star.textContent = n <= now ? '\u2605' : '\u2606';
@@ -2757,7 +2784,7 @@ function buildRecordRow(video, { add = false } = {}) {
 
   const stars = document.createElement('span');
   stars.className = 'stars';
-  for (let n = 1; n <= 5; n += 1) {
+  for (let n = 1; n <= RATING_MAX; n += 1) {
     const star = document.createElement('button');
     star.className = 'star' + (n <= (record.rating || 0) ? ' on' : '');
     star.textContent = n <= (record.rating || 0) ? '★' : '☆';
