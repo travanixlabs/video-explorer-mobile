@@ -699,9 +699,9 @@ async function loadMore() {
     do {
       if (state.flatten && !state.walk) return; // the walk finished
       if (state.flatten) {
-        // A level at a time, twenty folders per round trip -- the same $batch
-        // walk the shuffle uses, for the same reason: one folder per round trip
-        // was the measured minute on a library folder of five thousand.
+        // A level at a time, twenty folders per round trip, through $batch:
+        // one folder per round trip was the measured minute on a library
+        // folder of five thousand.
         const round = [state.walk];
         while (round.length < graph.BATCH && state.queue.length) {
           const spot = state.queue.shift();
@@ -1583,9 +1583,8 @@ function vocabularyByName(field) {
 /**
  * Does this video match that filter?
  *
- * Takes the filter rather than reading the one in force, because shuffle keeps
- * a second one of the same shape: its tags and rating are its own, and the
- * panel on the grid has no business deciding what it hands you.
+ * Takes the filter rather than reading the one in force, so the panel can ask
+ * about its draft before it is applied.
  */
 function matchesFilter(video, f) {
   const record = recordFor(video);
@@ -1795,398 +1794,6 @@ function resetAdv() {
   advDraft = newAdvFilter();
   renderAdv();
   applyAdv();
-}
-
-// ------------------------------------------------------------------ shuffle
-//
-// The other way into the library, and the same one the desktop grew. The grid
-// is for finding a particular video; this is for the evenings when the answer
-// is "something, anything, from in here", so it skips the grid and opens the
-// player on a video nobody chose.
-//
-// Three things it deliberately does NOT share with the filter beside it. Its
-// tags and rating are its own, because the panel on the grid is where you left
-// the grid and has no business deciding what you are shown tonight. It never
-// writes to that filter or to the listing, so closing the player puts you back
-// exactly where you were. And it always covers the whole tree below the folder
-// you are standing in, flattened, whether or not the ⇊ button is lit -- being
-// told there is nothing to shuffle while standing in a folder of folders would
-// be a silly answer to a fair question.
-
-const shuffle = {
-  on: false,
-  pool: [],
-  filter: null,
-  draft: null,
-  // What has been played this run, newest last, so Back walks it and a video
-  // does not come round again until the pool has been through.
-  seen: [],
-  at: -1,
-  // Which library folders it drew from: the ones picked in the sheet, or the
-  // folder in hand when none were. Held as ids, since that is what a walk needs.
-  dirs: new Set(),
-  draftDirs: new Set(),
-  // Whether the tree is still arriving. The pool is playable long before the
-  // walk finishes, and the readout says so rather than pretending to be final.
-  walking: false,
-  // The pick the NEXT forward press will play, drawn as soon as this one is on
-  // screen -- so its stream URL can be fetched while nobody is waiting.
-  ahead: null,
-  // Bumped on every start, so a walk whose sheet was closed and reopened
-  // cannot pour its results into the run that replaced it.
-  run: 0,
-};
-
-/**
- * The library's own top-level folders -- Folder 0, Folder 1, and so on at the
- * root of the drive. Read once and kept: a handful of entries that change
- * about never, and the sheet should not wait on a Graph call to open.
- */
-let shuffleRoots = null;
-
-async function loadShuffleRoots() {
-  if (shuffleRoots) return shuffleRoots;
-  try {
-    shuffleRoots = (await graph.listFolders(null, null)).filter(isLibraryFolder);
-  } catch {
-    // No row rather than an error: the folder you are standing in still works.
-    shuffleRoots = [];
-  }
-  return shuffleRoots;
-}
-
-/** The picked folders, as the walk wants them. */
-function shuffleDirs(ids = shuffle.draftDirs) {
-  return (shuffleRoots || []).filter((f) => ids.has(f.id));
-}
-
-/** "Folder 1", "Folder 1 and Folder 4", "Folder 1, Folder 2 and Folder 4". */
-function listOf(names) {
-  if (names.length < 2) return names[0] || '';
-  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
-}
-
-function shuffleWhere() {
-  const picked = shuffleDirs().map((f) => f.name);
-  if (picked.length) {
-    return `Anything in ${listOf(picked)} and every folder under`
-      + ` ${picked.length > 1 ? 'them' : 'it'}.`;
-  }
-  const here = state.stack.length ? state.stack[state.stack.length - 1].name : '';
-  return here
-    ? `Anything in ${here} and every folder under it.`
-    : 'Anything in here and every folder under it.';
-}
-
-function openShuffle() {
-  shuffle.draft = newAdvFilter();
-  if (shuffle.filter) {
-    shuffle.draft.mode = { ...shuffle.filter.mode };
-    for (const facet of ['race', 'tags', 'ratings']) {
-      shuffle.draft[facet] = new Map(shuffle.filter[facet] || []);
-    }
-  }
-  // No folder picking any more: a shuffle draws from the folder you are in.
-  shuffle.draftDirs = new Set();
-  $('#shuffle').hidden = false;
-  renderShuffle();
-}
-
-function renderShuffle() {
-  $('#shuffleWhere').textContent = shuffleWhere();
-  renderRaceRow($('#shuffleRace'), shuffle.draft.race, () => renderShuffle());
-  $('#shuffleRaceMode').textContent = shuffle.draft.mode.race || 'all';
-  const ratings = $('#shuffleRating');
-  ratings.innerHTML = '';
-  for (const value of RATING_VALUES) {
-    ratings.appendChild(advChip(
-      ratingChipLabel(value),
-      shuffle.draft.ratings.get(value),
-      () => { cycleIn(shuffle.draft.ratings, value); renderShuffle(); },
-    ));
-  }
-
-  const host = $('#shuffleTags');
-  host.innerHTML = '';
-  const gap = advChip('no tags', shuffle.draft.tags.get(NOTHING), () => {
-    cycleIn(shuffle.draft.tags, NOTHING);
-    renderShuffle();
-  });
-  gap.classList.add('none');
-  host.appendChild(gap);
-  const vocab = vocabularyByName('tags');
-  if (!vocab.length) host.insertAdjacentHTML('beforeend', '<span class="dim">nothing yet</span>');
-  for (const entry of vocab) {
-    host.appendChild(advChip(`${entry.tag} · ${entry.count}`, shuffle.draft.tags.get(entry.tag),
-      () => { cycleIn(shuffle.draft.tags, entry.tag); renderShuffle(); }));
-  }
-
-  $('#shuffleTagMode').textContent = shuffle.draft.mode.tags;
-
-  const bits = [];
-  for (const [facet, one, many] of [['race', 'race', 'races'], ['tags', 'tag', 'tags'], ['ratings', 'rating', 'ratings']]) {
-    const inn = picked(shuffle.draft[facet], 'in').length;
-    const out = picked(shuffle.draft[facet], 'out').length;
-    if (inn) bits.push(`${inn} ${inn === 1 ? one : many}`);
-    if (out) bits.push(`without ${out} ${out === 1 ? one : many}`);
-    const nothing = shuffle.draft[facet].get(NOTHING);
-    if (nothing === 'in') bits.push(`no ${many} at all`);
-    if (nothing === 'out') bits.push(`some ${many}`);
-  }
-  $('#shuffleSummary').textContent = bits.join(' · ') || 'everything';
-}
-
-/**
- * Every video below the folder in hand, handed over as it arrives.
- *
- * Two things make this bearable on a phone. It goes a level at a time, twenty
- * folders per round trip, because a tree of fifty folders walked one at a time
- * is fifty waits on a mobile connection -- a measured minute on a library
- * folder of five thousand. And it hands each round to its caller rather than
- * returning at the end, so the first video can be playing while the rest of the
- * tree is still arriving.
- *
- * The listing already knows the answer when it is flattened and has finished
- * streaming, and re-walking thousands of items over the network to learn what
- * is already in memory would be minutes of waiting for nothing.
- *
- * Everything lands in a private array either way, so the listing behind the
- * player is untouched when you come back to it.
- */
-/**
- * Walks whole trees, a level per round trip, handing videos over as they land.
- *
- * `spots` are the starting folders; every video found is attributed to the
- * spot whose tree it was found in, so a finished walk can be remembered per
- * folder. `going` is asked between rounds -- false abandons the walk with
- * nothing stored.
- *
- * A folder Graph refuses is tried once more -- a 429 is a bad moment rather
- * than a bad folder ("ObjectHandle is Invalid" is the other kind) -- and then
- * skipped by name. With nothing found anywhere, the refusal is the answer.
- */
-async function walkTrees(spots, going, onPage, skipped = []) {
-  const found = spots.map(() => []);
-  const queue = spots.map((spot, home) => ({ ...spot, next: null, home }));
-  let served = 0;
-  let refused = '';
-
-  while (queue.length) {
-    const round = queue.splice(0, graph.BATCH);
-    let pages;
-    try {
-      pages = await graph.listChildrenBatch(round);
-    } catch (err) {
-      // Nothing to show for it: the error is the answer. Otherwise the pool is
-      // what it is -- better a shuffle over most of the tree than none.
-      if (!served) throw err;
-      skipped.push(...round.map((spot) => spot.name || 'a folder'));
-      return null;
-    }
-    if (!going()) return null;           // the sheet was closed, or restarted
-
-    const videos = [];
-    pages.forEach((page, at) => {
-      const spot = round[at];
-      if (page.failed) {
-        if (!spot.tried) queue.push({ ...spot, tried: true });
-        else { skipped.push(spot.name || 'a folder'); refused = page.failed; }
-        return;
-      }
-      videos.push(...page.videos);
-      found[spot.home].push(...page.videos);
-      if (page.next) queue.push({ ...spot, next: page.next, tried: false });
-      // A subfolder that arrives without a drive of its own lives in the same
-      // drive as the folder holding it; passing its missing id straight back to
-      // Graph asks for /drives/null/items/… and loses the whole walk.
-      queue.push(...page.folders.map((f) => ({
-        driveId: f.driveId || spot.driveId, itemId: f.id, name: f.name,
-        next: null, home: spot.home,
-      })));
-    });
-
-    served += videos.length;
-    if (videos.length) onPage(videos);
-  }
-
-  // Nothing anywhere, and something was refused: that refusal is the answer,
-  // rather than a quiet "no videos here" over a folder full of them.
-  if (!served && refused) throw new Error(refused);
-  return found;
-}
-
-/** Where a folder's finished walk is remembered. */
-const walkKey = (spot) => `walk:${spot.driveId || 'me'}:${spot.itemId || 'root'}`;
-
-// One background re-walk per folder per session: a cached walk is served as it
-// stands, and the refresh quietly replaces it for next time.
-const rewalked = new Set();
-
-function refreshWalk(spot) {
-  const key = walkKey(spot);
-  if (rewalked.has(key)) return;
-  rewalked.add(key);
-  (async () => {
-    const found = await walkTrees([spot], () => true, () => {}, []);
-    if (found) await graph.kvSet(key, { at: Date.now(), videos: found[0] });
-  })().catch(() => { /* next session's shuffle walks it properly */ });
-}
-
-async function shufflePool(run, onPage, skipped = []) {
-  const roots = shuffleDirs(shuffle.dirs);
-  // The listing already knows the answer only when it is the whole tree AND the
-  // tree asked for is the one on screen.
-  if (!roots.length && state.flatten && !moreToLoad() && !state.loading) {
-    onPage(state.videos.filter((v) => !v.isFolder));
-    return;
-  }
-  const { driveId, itemId } = state.source || {};
-  const spots = roots.length
-    ? roots.map((f) => ({ driveId: f.driveId, itemId: f.id, name: f.name }))
-    : [{ driveId, itemId, name: '' }];
-
-  // A folder walked before answers from IndexedDB at once -- the whole tree,
-  // no requests -- and is re-walked quietly behind the shuffle so the NEXT
-  // evening sees whatever was added since. At worst a pick is a video deleted
-  // since the walk, which fails to open exactly as any deleted video does.
-  const todo = [];
-  for (const spot of spots) {
-    const held = await graph.kvGet(walkKey(spot));
-    if (held && Array.isArray(held.videos) && held.videos.length) {
-      onPage(held.videos);
-      refreshWalk(spot);
-    } else {
-      todo.push(spot);
-    }
-  }
-  if (!todo.length) return;
-
-  const found = await walkTrees(todo, () => shuffle.run === run, onPage, skipped);
-  if (!found) return;
-  await Promise.all(todo.map((spot, at) => graph.kvSet(walkKey(spot), {
-    at: Date.now(), videos: found[at],
-  })));
-}
-
-async function startShuffle() {
-  shuffle.filter = shuffle.draft;
-  // Folders picked in the sheet win over the one you are standing in; with none
-  // picked it is the folder in hand, as it always was.
-  shuffle.dirs = new Set(shuffle.draftDirs);
-  const run = shuffle.run + 1;
-  shuffle.run = run;
-
-  const start = $('#shuffleStart');
-  start.disabled = true;
-  $('#shuffleSummary').textContent = 'Looking…';
-  shuffle.pool = [];
-  shuffle.seen = [];
-  shuffle.at = -1;
-  shuffle.ahead = null;   // a pick drawn for an earlier run is not this one's
-  shuffle.walking = true;
-  const skipped = [];
-  let seen = 0;
-
-  try {
-    // The whole tree first, THEN the draw. It used to start on the first page
-    // that held a match, so the first pick -- and the one drawn ahead of it --
-    // came from that page alone. The walk visits folders in the same order
-    // every time, so a fresh walk kept opening on the same handful of videos,
-    // and under a narrow filter on the very same one. A walk held from an
-    // earlier evening arrives whole and at once, so this costs nothing then;
-    // only a tree never walked before makes you wait, once.
-    await shufflePool(run, (videos) => {
-      if (shuffle.run !== run) return;
-      seen += videos.length;
-      shuffle.pool.push(...videos.filter((v) => matchesFilter(v, shuffle.filter)));
-      $('#shuffleSummary').textContent =
-        `Looking… ${seen.toLocaleString()} so far, ${shuffle.pool.length.toLocaleString()} match`;
-    }, skipped);
-    if (shuffle.run !== run) return;
-    shuffle.walking = false;
-    if (skipped.length) {
-      toast(skipped.length === 1
-        ? `Skipped ${skipped[0]} — OneDrive would not list it`
-        : `Skipped ${skipped.length} folders OneDrive would not list`, 'err');
-    }
-    if (!shuffle.pool.length) {
-      $('#shuffleSummary').textContent = seen
-        ? `Nothing here matches — ${seen} videos, none of them`
-        : `No videos under ${shuffle.dirs.size > 1 ? 'those folders' : 'this folder'}`;
-      return;
-    }
-    // Every match is in the pool, so every one is equally likely.
-    shuffle.on = true;
-    $('#shuffle').hidden = true;
-    syncShuffleBadge();
-    shuffleStep(1);
-    syncPlayerNav();
-  } catch (err) {
-    if (shuffle.run !== run) return;
-    shuffle.walking = false;
-    $('#shuffleSummary').textContent = '';
-    toast(err.message, 'err');
-  } finally {
-    start.disabled = false;
-  }
-}
-
-/**
- * The next video, or the one before it.
- *
- * Forward draws one that has not come up yet, so a run of twenty is twenty
- * different videos rather than a coin toss twenty times; once the pool is spent
- * it starts a fresh pass. Back walks what has already been shown, because
- * "wait, go back" is the one thing you always want from a shuffle and
- * re-randomising would make it impossible.
- */
-function shuffleStep(step) {
-  if (!shuffle.pool.length) return;
-  if (step < 0) {
-    if (shuffle.at <= 0) return;
-    shuffle.at -= 1;
-    goToVideo(shuffle.seen[shuffle.at], step);
-    return;
-  }
-  if (shuffle.at + 1 < shuffle.seen.length) {
-    shuffle.at += 1;
-    goToVideo(shuffle.seen[shuffle.at], step);
-    return;
-  }
-  const shown = new Set(shuffle.seen.map((v) => v.id));
-  let fresh = shuffle.pool.filter((v) => !shown.has(v.id));
-  // Everything has had a turn: start again, but never with the one on screen.
-  if (!fresh.length) {
-    fresh = shuffle.pool.filter((v) => v.id !== state.playingId);
-    if (!fresh.length) fresh = shuffle.pool.slice();
-    shuffle.seen = [];
-    shuffle.at = -1;
-  }
-  // The pick drawn ahead, if it is still drawable; its stream URL is already
-  // in hand, which is what makes Next feel instant.
-  const pick = (shuffle.ahead && fresh.some((v) => v.id === shuffle.ahead.id))
-    ? shuffle.ahead
-    : fresh[Math.floor(Math.random() * fresh.length)];
-  shuffle.ahead = null;
-  shuffle.seen.push(pick);
-  shuffle.at = shuffle.seen.length - 1;
-  goToVideo(pick, step);
-}
-
-/** Leaving the player leaves the shuffle. The listing was never touched. */
-function stopShuffle() {
-  shuffle.on = false;
-  shuffle.pool = [];
-  shuffle.seen = [];
-  shuffle.ahead = null;
-  shuffle.at = -1;
-  shuffle.walking = false;
-  shuffle.run += 1;   // abandon any walk still running
-  syncShuffleBadge();
-}
-
-function syncShuffleBadge() {
-  $('#shuffleBtn').classList.toggle('on', shuffle.on);
 }
 
 /**
@@ -3295,24 +2902,11 @@ function renderPlayerDetails(video) {
 /**
  * Whatever the next press will most likely play, its stream URL fetched now.
  *
- * In a listing that is simply the next card. In a shuffle the next pick is
- * DRAWN here, ahead of the press, so there is something to warm -- the press
- * then plays exactly the pick that was warmed.
+ * The next card in the listing.
  */
 function primeNext() {
   let next = null;
-  if (shuffle.on && shuffle.pool.length) {
-    if (shuffle.at + 1 < shuffle.seen.length) {
-      next = shuffle.seen[shuffle.at + 1];
-    } else {
-      const shown = new Set(shuffle.seen.map((v) => v.id));
-      const fresh = shuffle.pool.filter((v) => !shown.has(v.id));
-      if (fresh.length) {
-        shuffle.ahead = fresh[Math.floor(Math.random() * fresh.length)];
-        next = shuffle.ahead;
-      }
-    }
-  } else if (state.playingId) {
+  if (state.playingId) {
     const list = playerList();
     const at = list.findIndex((v) => v.id === state.playingId);
     if (at >= 0 && list.length > 1) next = list[(at + 1) % list.length];
@@ -3468,9 +3062,6 @@ async function goToVideo(video, step) {
 }
 
 function playSibling(step) {
-  // Shuffling, the arrows and the swipe mean something else entirely: there is
-  // no listing to be next in, only a pool to draw from.
-  if (shuffle.on) { shuffleStep(step); return; }
   const list = playerList();
   if (list.length < 2 || !state.playingId) return;
   const at = list.findIndex((v) => v.id === state.playingId);
@@ -3480,20 +3071,6 @@ function playSibling(step) {
 
 /** Hides the arrows when there is nowhere to go, and says where you are. */
 function syncPlayerNav() {
-  // A shuffle has no position in a listing to report: it has a pool, how far
-  // into it this run has got, and a back arrow only once there is something
-  // behind you.
-  if (shuffle.on) {
-    $('#playerPrev').hidden = shuffle.at <= 0;
-    $('#playerNext').hidden = shuffle.pool.length < 2;
-    const pos = $('#playerPos');
-    pos.hidden = false;
-    // A trailing + while the tree is still arriving: the pool it is drawing
-    // from is real, and still growing.
-    pos.textContent = `🔀 ${shuffle.at + 1} of ${shuffle.pool.length}`
-      + (shuffle.walking ? '+' : '');
-    return;
-  }
   const list = playerList();
   const at = list.findIndex((v) => v.id === state.playingId);
   const usable = list.length > 1 && at >= 0;
@@ -3522,7 +3099,7 @@ function attachPullToRefresh() {
   let armed = false;
 
   const overlayOpen = () => !$('#player').hidden || !$('#adv').hidden
-    || !$('#shuffle').hidden || !$('#labels').hidden || !$('#picker').hidden
+    || !$('#labels').hidden || !$('#picker').hidden
     || !$('#lineup').hidden;
 
   document.addEventListener('touchstart', (ev) => {
@@ -3639,8 +3216,7 @@ function attachPlayerSwipe() {
 }
 
 /**
- * Autoplay: when a video ends, the next one plays -- the listing's next, or in
- * a shuffle the next pick, which is what makes shuffle a lean-back mode.
+ * Autoplay: when a video ends, the listing's next one plays.
  * Remembered per device; a phone on a data plan may well want it off.
  */
 let autoNext = false;
@@ -3661,10 +3237,6 @@ function closePlayer() {
   el.load();
   $('#player').hidden = true;
   state.playingId = null;
-  // Closing the player is how a shuffle ends. The listing underneath is the one
-  // that was there before it started -- nothing about it was changed to get
-  // here, so there is nothing to put back.
-  if (shuffle.on) stopShuffle();
 
   if (playerReturn === null) return;
   const back = playerReturn;
@@ -3754,27 +3326,6 @@ async function boot() {
     });
   }
 
-  $('#shuffleBtn').addEventListener('click', openShuffle);
-  // Closing the sheet abandons any walk it started, so a folder of thousands
-  // does not go on fetching pages for a shuffle nobody is waiting for.
-  $('#shuffleClose').addEventListener('click', () => {
-    shuffle.run += 1;
-    $('#shuffle').hidden = true;
-  });
-  $('#shuffleStart').addEventListener('click', startShuffle);
-  $('#shuffleReset').addEventListener('click', () => {
-    shuffle.draft = newAdvFilter();
-    shuffle.draftDirs.clear();
-    renderShuffle();
-  });
-  $('#shuffleRaceMode').addEventListener('click', () => {
-    shuffle.draft.mode.race = shuffle.draft.mode.race === 'any' ? 'all' : 'any';
-    renderShuffle();
-  });
-  $('#shuffleTagMode').addEventListener('click', () => {
-    shuffle.draft.mode.tags = shuffle.draft.mode.tags === 'all' ? 'any' : 'all';
-    renderShuffle();
-  });
   $('#labelsClose').addEventListener('click', () => { $('#labels').hidden = true; });
   $('#labelsAdd').addEventListener('click', () => commitLabels('add'));
   $('#labelsReplace').addEventListener('click', () => commitLabels('replace'));

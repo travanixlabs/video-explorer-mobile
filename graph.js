@@ -349,7 +349,7 @@ export async function itemById(driveId, itemId) {
 // ----------------------------------------------------------- a small kv store
 //
 // IndexedDB behind two functions, for the things worth keeping between opens:
-// the labels file and the shuffle's walks. localStorage is the wrong tool at
+// the labels file. localStorage is the wrong tool at
 // these sizes -- the labels alone are 4MB -- and a cache that can throw on a
 // private tab must never take the app down, so every path here swallows its
 // own failures and answers null.
