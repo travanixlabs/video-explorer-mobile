@@ -1546,7 +1546,7 @@ function racesOf(record) {
 const PERSON_FACETS = {
   height: ['Tall', 'Average', 'Small'],
   bust: ['Massive', 'Big', 'Average', 'Small'],
-  body: ['Curvy', 'Muscular', 'Athletic', 'Average', 'Petite', 'Toned'],
+  body: ['Muscular', 'Athletic', 'Toned', 'Curvy', 'Average', 'Petite'],
   race: RACES,
   favourites: ['Tier 1', 'Tier 2', 'Tier 3'],
 };
