@@ -2113,20 +2113,8 @@ function buildLabelChips(video, row) {
   const chips = document.createElement('span');
   chips.className = 'chips';
 
-  // Race first, from the performers credited -- then models, then tags. In the
-  // player only: on a card in the grid it was one pill too many.
-  for (const race of (row && row.classList.contains('in-player') ? racesOf(record) : [])) {
-    const chip = document.createElement('button');
-    chip.className = 'chip race';
-    paintChip(chip, 'race', race);
-    chip.textContent = race;
-    chip.title = race;
-    chip.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      filterByLabel('race', race);
-    });
-    chips.appendChild(chip);
-  }
+  // Models, then tags. Race is not shown, in the player or on a card: it
+  // belongs to a person, and is filtered from the advanced filters.
 
   for (const spec of LABEL_FIELDS) {
     for (const value of valuesOf(record, spec.field)) {
