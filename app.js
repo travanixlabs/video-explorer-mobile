@@ -1094,7 +1094,7 @@ function syncGroupButton() {
  * number on purpose: a group here and a suggestion there disagreeing about who
  * might be in a video is the confusing part, not the number itself.
  */
-const FACE_FLOOR = 0.50;
+const FACE_FLOOR = 0.20;
 
 function buildModelGroups(list, mode = 'models') {
   const groups = new Map();
