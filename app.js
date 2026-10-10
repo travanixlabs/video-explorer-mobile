@@ -1453,7 +1453,7 @@ function applyCardWidth() {
  * scores nothing, same as never having rated it.
  */
 // Points per rating, unrated to ten stars.
-const STAR_POINTS = [0, 5, 10, 25, 50, 75, 100, 250, 500, 750, 1000];
+const STAR_POINTS = [0, 50, 75, 100, 250, 500, 1000, 2500, 5000, 7500, 10000];
 
 /**
  * Favourite performers, beside the records rather than inside them.
