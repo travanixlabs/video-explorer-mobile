@@ -1516,8 +1516,14 @@ function newAdvFilter() {
     // Per facet: "all of these tags" and "any of these performers" is a
     // reasonable pair to ask for. Exclusions are always all-of, since "not
     // this" means not this either way.
-    mode: { tags: 'all', models: 'all', race: 'all' },
+    mode: {
+      tags: 'all', models: 'all', height: 'all', bust: 'all', body: 'all', race: 'all', favourites: 'all',
+    },
+    height: new Map(),
+    bust: new Map(),
+    body: new Map(),
     race: new Map(),
+    favourites: new Map(),
   };
 }
 
@@ -1529,13 +1535,41 @@ function newAdvFilter() {
 const RACES = ['Asian', 'Black', 'White', 'Other'];
 
 function racesOf(record) {
-  const map = state.library.races || {};
+  return personValues('race', record);
+}
+
+/**
+ * What belongs to a performer rather than a file -- the desktop labels them,
+ * and they live beside the races in the library file. A video carries whatever
+ * its credited performers have, so each is matched like a tag list.
+ */
+const PERSON_FACETS = {
+  height: ['Tall', 'Average', 'Small'],
+  bust: ['Massive', 'Big', 'Average', 'Small'],
+  body: ['Curvy', 'Muscular', 'Athletic', 'Average', 'Petite', 'Toned'],
+  race: RACES,
+  favourites: ['Tier 1', 'Tier 2', 'Tier 3'],
+};
+const PERSON_FIELDS = Object.keys(PERSON_FACETS);
+
+/** One performer facet's values on a video, in that facet's order. */
+function personValues(field, record) {
+  const lib = state.library || {};
+  const favs = new Set((lib.favourites || []).map((n) => String(n).toLowerCase()));
   const have = new Set();
-  for (const name of record.models || []) {
-    const race = map[String(name).trim().toLowerCase()];
-    if (race) have.add(race);
+  for (const raw of record.models || []) {
+    const name = String(raw).trim().toLowerCase();
+    if (field === 'race') {
+      const race = (lib.races || {})[name];
+      if (race) have.add(race);
+    } else if (field === 'favourites') {
+      if (favs.has(name)) have.add(`Tier ${(lib.favouriteTiers || {})[name] || 3}`);
+    } else {
+      const value = ((lib.traits || {})[name] || {})[field];
+      for (const v of Array.isArray(value) ? value : (value ? [value] : [])) have.add(v);
+    }
   }
-  return RACES.filter((r) => have.has(r));
+  return PERSON_FACETS[field].filter((v) => have.has(v));
 }
 
 
@@ -1545,7 +1579,7 @@ function racesOf(record) {
  */
 const NOTHING = '\u0000';
 
-const FACETS = ['tags', 'models', 'ratings', 'race'];
+const FACETS = ['tags', 'models', 'ratings'].concat(PERSON_FIELDS);
 
 let adv = newAdvFilter();
 let advDraft = newAdvFilter();
@@ -1597,9 +1631,9 @@ function matchesFilter(video, f) {
     if (barred.includes(rating)) return false;
   }
 
-  for (const field of ['race', 'tags', 'models']) {
+  for (const field of PERSON_FIELDS.concat(['tags', 'models'])) {
     if (!f[field] || !f[field].size) continue;
-    const held = field === 'race' ? racesOf(record) : valuesOf(record, field);
+    const held = PERSON_FACETS[field] ? personValues(field, record) : valuesOf(record, field);
     const have = new Set(held.map((t) => String(t).toLowerCase()));
 
     // "Has none at all" is its own question, asked before any value is compared.
@@ -1640,22 +1674,31 @@ function openAdv() {
   renderAdv();
 }
 
-/** A race row: four answers and "no race", picked first, cycling as tags do. */
-function renderRaceRow(host, facet, redraw) {
+/** The performer rows: facet, host, its "none" chip, and its all/any button. */
+const PERSON_ROWS = [
+  ['height', '#advHeight', 'no height', '#advHeightMode'],
+  ['bust', '#advBust', 'no bust', '#advBustMode'],
+  ['body', '#advBody', 'no body', '#advBodyMode'],
+  ['race', '#advRace', 'no race', '#advRaceMode'],
+  ['favourites', '#advFavourites', 'no favourite', '#advFavouritesMode'],
+];
+
+/** A performer row: its answers and a "none" chip, cycling as tags do. */
+function renderPersonRow(host, values, facet, none, redraw) {
   if (!host) return;
   host.innerHTML = '';
-  const rank = (r) => (facet.get(r) === 'in' ? 0 : facet.get(r) === 'out' ? 1 : 2);
-  const order = RACES.map((r, i) => [r, i]).sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]);
-  for (const [race] of order) {
-    host.appendChild(advChip(race, facet.get(race), () => { cycleIn(facet, race); redraw(); }));
+  for (const value of values) {
+    host.appendChild(advChip(value, facet.get(value), () => { cycleIn(facet, value); redraw(); }));
   }
-  const gap = advChip('no race', facet.get(NOTHING), () => { cycleIn(facet, NOTHING); redraw(); });
+  const gap = advChip(none, facet.get(NOTHING), () => { cycleIn(facet, NOTHING); redraw(); });
   gap.classList.add('none');
   host.appendChild(gap);
 }
 
 function renderAdv() {
-  renderRaceRow($('#advRace'), advDraft.race, () => renderAdv());
+  for (const [field, host, none] of PERSON_ROWS) {
+    renderPersonRow($(host), PERSON_FACETS[field], advDraft[field], none, () => renderAdv());
+  }
   const ratings = $('#advRating');
   ratings.innerHTML = '';
   for (const value of RATING_VALUES) {
@@ -1716,7 +1759,9 @@ function renderAdv() {
 
   $('#advTagMode').textContent = advDraft.mode.tags;
   $('#advModelMode').textContent = advDraft.mode.models;
-  $('#advRaceMode').textContent = advDraft.mode.race || 'all';
+  for (const [field, , , modeId] of PERSON_ROWS) {
+    $(modeId).textContent = advDraft.mode[field] || 'all';
+  }
 
   const bits = [];
   const say = (field, one, many = one + 's') => {
@@ -1728,10 +1773,14 @@ function renderAdv() {
     if (nothing === 'in') bits.push(`no ${many} at all`);
     if (nothing === 'out') bits.push(`some ${many}`);
   };
+  say('height', 'height', 'heights');
+  say('bust', 'bust', 'busts');
+  say('body', 'body type', 'body types');
   say('race', 'race', 'races');
+  say('favourites', 'favourite tier', 'favourite tiers');
   say('models', 'model');
-  say('tags', 'tag');
   say('ratings', 'rating');
+  say('tags', 'tag');
   $('#advSummary').textContent = bits.join(' · ') || 'no filters';
 }
 
@@ -3319,7 +3368,8 @@ async function boot() {
   $('#advReset').addEventListener('click', () => {
     resetAdv();
   });
-  for (const [field, id] of [['race', '#advRaceMode'], ['tags', '#advTagMode'], ['models', '#advModelMode']]) {
+  for (const [field, id] of PERSON_ROWS.map(([f, , , m]) => [f, m])
+    .concat([['tags', '#advTagMode'], ['models', '#advModelMode']])) {
     $(id).addEventListener('click', () => {
       advDraft.mode[field] = advDraft.mode[field] === 'all' ? 'any' : 'all';
       renderAdv();
