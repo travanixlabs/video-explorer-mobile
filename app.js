@@ -2271,6 +2271,9 @@ function renderLabelSuggestions() {
     const used = new Set(labelDraft[field].map((t) => t.toLowerCase()));
     const found = vocab.filter((entry) => !used.has(entry.tag.toLowerCase())
       && (!want || entry.tag.toLowerCase().includes(want)));
+    // Performers are found by typing; with nothing typed, no list at all.
+    if (field === 'models' && !want) { box.hidden = true; continue; }
+    box.hidden = false;
     if (!found.length) {
       box.innerHTML = want
         ? '<span class="dim">nothing by that name \u2014 tap enter to add it</span>'

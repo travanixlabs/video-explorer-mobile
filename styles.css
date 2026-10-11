@@ -893,3 +893,6 @@ body.selecting .tick { opacity: 1; }
 /* The label sheet opens from the player's + as well as the selection bar, so
    it has to sit above the player (90) and its overlays (95), under toasts. */
 #labels { z-index: 100; }
+
+/* Hidden when there is nothing to offer, e.g. the models list until you type. */
+.chip-row[hidden] { display: none; }
