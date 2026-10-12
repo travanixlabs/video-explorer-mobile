@@ -1548,7 +1548,7 @@ const PERSON_FACETS = {
   bust: ['Massive', 'Big', 'Average', 'Small'],
   body: ['Athletic', 'Tattoos', 'Curvy', 'Average', 'Petite'],
   race: RACES,
-  favourites: ['Tier 1', 'Tier 2', 'Tier 3'],
+  favourites: ['Tier 1', 'Tier 2', 'Tier 3', 'Tier 4', 'Tier 5'],
 };
 const PERSON_FIELDS = Object.keys(PERSON_FACETS);
 
