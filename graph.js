@@ -429,24 +429,64 @@ const LIBRARY_PATH = '/me/drive/root:/.video-explorer/library.json';
  * for the download. Every save stores the tag Graph hands back with the PUT,
  * so a phone that did the writing matches on its next open too.
  */
-export async function loadLibrary() {
-  let meta;
-  try {
-    meta = await call(`${LIBRARY_PATH}?$select=cTag,size`);
-  } catch (err) {
-    if (err.status === 404) {
-      kvDel('library');
-      return { version: 1, records: {} };
+
+/**
+ * Three ways to one library -- what both sides started from, ours, theirs.
+ * The same rules as the desktop's library.js mergeLibraries, kept in step by
+ * hand: per record (and per race / trait / tier), the side that changed it
+ * wins; both changed, the later `updated` wins, ours on a tie, and an edit
+ * always beats a deletion. Favourites merge by name.
+ */
+export function mergeLibraries(base, ours, theirs) {
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const pick = (b, o, t, both) => {
+    const oc = !same(o, b);
+    const tc = !same(t, b);
+    if (oc && !tc) return o;
+    if (tc && !oc) return t;
+    if (!oc) return o;
+    if (o === undefined) return t;
+    if (t === undefined) return o;
+    return both(o, t);
+  };
+  const newer = (o, t) => ((Number(t.updated) || 0) > (Number(o.updated) || 0) ? t : o);
+  const mine = (o) => o;
+  const mergeMap = (bm, om, tm, both) => {
+    bm = bm || {}; om = om || {}; tm = tm || {};
+    const out = {};
+    for (const k of new Set([...Object.keys(bm), ...Object.keys(om), ...Object.keys(tm)])) {
+      const v = pick(bm[k], om[k], tm[k], both);
+      if (v !== undefined) out[k] = v;
     }
-    throw new Error(`Could not read your labels (${err.status || err.message})`);
+    return out;
+  };
+  const names = (list) => new Map((Array.isArray(list) ? list : []).map((n) => [String(n).toLowerCase(), n]));
+  const bf = names(base.favourites);
+  const of = names(ours.favourites);
+  const tf = names(theirs.favourites);
+  const favourites = [];
+  for (const k of new Set([...bf.keys(), ...of.keys(), ...tf.keys()])) {
+    const keep = of.has(k) !== bf.has(k) ? of.has(k) : tf.has(k);
+    if (keep) favourites.push(of.get(k) || tf.get(k));
   }
-  const tag = meta.cTag || '';
+  favourites.sort((a, b) => String(a).localeCompare(String(b), undefined, { sensitivity: 'base' }));
+  return {
+    ...theirs,
+    ...ours,
+    records: mergeMap(base.records, ours.records, theirs.records, newer),
+    races: mergeMap(base.races, ours.races, theirs.races, mine),
+    traits: mergeMap(base.traits, ours.traits, theirs.traits, mine),
+    favouriteTiers: mergeMap(base.favouriteTiers, ours.favouriteTiers, theirs.favouriteTiers, mine),
+    favourites,
+  };
+}
 
-  const held = await kvGet('library');
-  if (held && tag && held.tag === tag && held.body && held.body.records) {
-    return held.body;
-  }
+// The file as this phone last read or wrote it: its eTag, for a conditional
+// save, and its contents, as the common ancestor of a merge.
+let libHeld = { eTag: '', base: null };
+const copyOf = (obj) => JSON.parse(JSON.stringify(obj));
 
+async function downloadLibrary() {
   const token = await accessToken();
   const res = await fetch(`${BASE}${LIBRARY_PATH}:/content`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -457,8 +497,42 @@ export async function loadLibrary() {
   if (!body || typeof body !== 'object' || !body.records || typeof body.records !== 'object') {
     throw new Error('The labels file on OneDrive is not in a shape this understands');
   }
+  return body;
+}
+
+export async function loadLibrary() {
+  let meta;
+  try {
+    meta = await call(`${LIBRARY_PATH}?$select=cTag,eTag,size`);
+  } catch (err) {
+    if (err.status === 404) {
+      kvDel('library');
+      return { version: 1, records: {} };
+    }
+    throw new Error(`Could not read your labels (${err.status || err.message})`);
+  }
+  const tag = meta.cTag || '';
+
+  const kept = await kvGet('library');
+  if (kept && tag && kept.tag === tag && kept.body && kept.body.records) {
+    libHeld = { eTag: meta.eTag || '', base: copyOf(kept.body) };
+    return kept.body;
+  }
+
+  const body = await downloadLibrary();
+  libHeld = { eTag: meta.eTag || '', base: copyOf(body) };
   if (tag) await kvSet('library', { tag, body });
   return body;
+}
+
+/**
+ * Whether the file on OneDrive has moved on from the one this phone holds --
+ * the desktop saved since. A few hundred bytes to ask.
+ */
+export async function libraryChanged() {
+  if (!libHeld.eTag) return false;
+  const meta = await call(`${LIBRARY_PATH}?$select=eTag`);
+  return Boolean(meta.eTag && meta.eTag !== libHeld.eTag);
 }
 
 // What the last successful load contained, so a save can tell an edit from a
@@ -469,31 +543,56 @@ export function noteLoaded(library) {
   loadedCount = Object.keys((library && library.records) || {}).length;
 }
 
+/**
+ * Saves, but only over the version this phone last saw. If the desktop wrote
+ * in between, OneDrive answers 412: theirs is fetched, the two are merged with
+ * what both started from, and the merge is saved instead -- so neither device
+ * writes over the other's edits. Returns the library as saved, which may hold
+ * more than was handed in.
+ */
 export async function saveLibrary(library) {
-  const count = Object.keys((library && library.records) || {}).length;
-  // The signature of a wipe: everything, gone, from a device that deletes one
-  // record at a time. Nothing legitimate on this phone produces it, so refusing
-  // costs nothing and the one time it fires it saves the library.
-  if (loadedCount && !count) {
-    throw new Error('Refusing to save an empty library over your labels');
+  let ours = library;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const count = Object.keys((ours && ours.records) || {}).length;
+    // The signature of a wipe: everything, gone, from a device that deletes one
+    // record at a time. Nothing legitimate on this phone produces it, so refusing
+    // costs nothing and the one time it fires it saves the library.
+    if (loadedCount && !count) {
+      throw new Error('Refusing to save an empty library over your labels');
+    }
+    const token = await accessToken();
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    if (libHeld.eTag) headers['If-Match'] = libHeld.eTag;
+    const res = await fetch(`${BASE}${LIBRARY_PATH}:/content`, {
+      method: 'PUT',
+      headers,
+      // Compact, matching what the desktop writes: the indentation was a fifth of
+      // the file, and this one goes up a phone's mobile data every time a star is
+      // pressed.
+      body: JSON.stringify(ours),
+    });
+    if (res.status === 412) {
+      // Somebody else saved first. Theirs, merged with ours, then try again.
+      const meta = await call(`${LIBRARY_PATH}?$select=eTag`);
+      const theirs = await downloadLibrary();
+      ours = mergeLibraries(libHeld.base || { records: {} }, ours, theirs);
+      libHeld = { eTag: meta.eTag || '', base: copyOf(theirs) };
+      continue;
+    }
+    if (!res.ok) throw new Error(`Could not save ratings (${res.status})`);
+    loadedCount = count;
+    // The PUT answers with the item as it now stands, tags included -- kept, so
+    // the next save is conditional on it and the next open skips the download.
+    try {
+      const item = await res.json();
+      libHeld = { eTag: (item && item.eTag) || '', base: copyOf(ours) };
+      if (item && item.cTag) await kvSet('library', { tag: item.cTag, body: ours });
+    } catch {
+      libHeld = { eTag: '', base: copyOf(ours) };
+    }
+    return ours;
   }
-  const token = await accessToken();
-  const res = await fetch(`${BASE}${LIBRARY_PATH}:/content`, {
-    method: 'PUT',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    // Compact, matching what the desktop writes: the indentation was a fifth of
-    // the file, and this one goes up a phone's mobile data every time a star is
-    // pressed.
-    body: JSON.stringify(library),
-  });
-  if (!res.ok) throw new Error(`Could not save ratings (${res.status})`);
-  loadedCount = count;
-  // The PUT answers with the item as it now stands, tag included -- kept, so
-  // the next open matches its own write and skips the download.
-  try {
-    const item = await res.json();
-    if (item && item.cTag) await kvSet('library', { tag: item.cTag, body: library });
-  } catch { /* an unreadable reply just means one extra download next open */ }
+  throw new Error('Could not save ratings: the file kept changing underneath');
 }
 
 const VE_PATH = '/me/drive/root:/.video-explorer';

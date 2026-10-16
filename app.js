@@ -149,7 +149,8 @@ function toast(message, kind = '', action = null) {
     el.appendChild(btn);
   }
   $('#toasts').appendChild(el);
-  setTimeout(() => el.remove(), action ? 8000 : 3200);
+  // A sticky one waits to be answered.
+  if (!(action && action.sticky)) setTimeout(() => el.remove(), action ? 8000 : 3200);
 }
 
 function setBusy(text) {
@@ -589,8 +590,7 @@ function scheduleSave() {
   saveTimer = setTimeout(async () => {
     if (!state.libraryLoaded) return;
     try {
-      await graph.saveLibrary(state.library);
-      state.dirty = false;
+      await saveAndAdopt();
       dirtySince = 0;
     } catch (err) {
       dirtySince = 0;
@@ -605,10 +605,39 @@ function scheduleSave() {
 window.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden' && state.dirty && state.libraryLoaded) {
     clearTimeout(saveTimer);
-    graph.saveLibrary(state.library).then(() => { state.dirty = false; }).catch(() => {});
+    saveAndAdopt().catch(() => {});
   }
   if (document.visibilityState === 'visible' && !state.libraryLoaded) readLibrary();
+  // Back after a while with nothing unsaved: the desktop may have labelled
+  // things since. A newer file is read in; the eTag check costs almost nothing.
+  else if (document.visibilityState === 'visible' && !state.dirty) {
+    graph.libraryChanged().then((changed) => { if (changed && !state.dirty) readLibrary(); }).catch(() => {});
+  }
 });
+
+/**
+ * Saves, and takes on whatever the save merged in: when the desktop wrote
+ * first, what lands on OneDrive is both sets of edits, and that is now ours.
+ */
+async function saveAndAdopt() {
+  // What is sent is a snapshot: an edit made while the upload is in the air
+  // lands on state.library, marks it dirty again and is saved next time.
+  // Records are replaced, never mutated, so a shallow copy is enough.
+  const sent = { ...state.library, records: { ...state.library.records } };
+  state.dirty = false;
+  let saved;
+  try {
+    saved = await graph.saveLibrary(sent);
+  } catch (err) {
+    state.dirty = true;
+    throw err;
+  }
+  if (saved !== sent) {
+    state.library = graph.mergeLibraries(sent, state.library, saved);
+    graph.noteLoaded(state.library);
+    if (state.videos.length) render();
+  }
+}
 
 // ---------------------------------------------------------------- navigation
 
@@ -3480,10 +3509,22 @@ if ('serviceWorker' in navigator) {
   // first install, when nothing older was showing.
   if (navigator.serviceWorker.controller) {
     let reloaded = false;
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
+    // Not straight away when it would cost something: a reload mid-video
+    // stops it, and one with labels unsaved cancels the upload. Then the
+    // update waits for a tap, saving first.
+    const reload = async () => {
       if (reloaded) return;
       reloaded = true;
+      if (state.dirty && state.libraryLoaded) {
+        clearTimeout(saveTimer);
+        await saveAndAdopt().catch(() => {});
+      }
       location.reload();
+    };
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      const busy = state.dirty || !$('#player').hidden || !$('#labels').hidden;
+      if (!busy) { reload(); return; }
+      toast('A new version is ready', 'ok', { label: 'Reload', run: reload, sticky: true });
     });
   }
   navigator.serviceWorker.register('./sw.js').catch(() => {});
