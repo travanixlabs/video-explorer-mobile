@@ -9,7 +9,7 @@
  * would fill the phone and serve stale, dead URLs.
  */
 
-const VERSION = 'v39';
+const VERSION = 'v40';
 const SHELL = [
   './',
   './index.html',
@@ -37,30 +37,40 @@ self.addEventListener('activate', (event) => {
     .then(() => self.clients.claim()));
 });
 
+// The shell by pathname, which is how a request is recognised as one of it.
+const SHELL_PATHS = new Set(SHELL.map((path) => new URL(path, self.location).pathname));
+
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   // Only our own static files. Anything on graph.microsoft.com, the login
-  // endpoints, or a signed CDN URL goes straight to the network.
+  // endpoints, or a signed CDN URL goes straight to the network -- and so does
+  // anything of ours that is not the shell, which is never stored.
   if (url.origin !== self.location.origin || event.request.method !== 'GET') return;
+  if (!SHELL_PATHS.has(url.pathname)) return;
 
-  // Network first, asked to revalidate (`no-cache`), so a push shows on the
-  // next load. It was stale-while-revalidate, which always answered with the
-  // cached copy and made every update land one open late -- a refresh showed
-  // the old app however hard it was pressed. Revalidating costs a 304 per file
-  // when nothing changed. A slow or absent network still gets the cached app:
-  // after WAIT the cache answers, and the network's copy is stored behind it.
-  const WAIT = 3000;
+  // Cache first. A push reaches the phone through this file instead: a new
+  // VERSION installs fresh copies past the HTTP cache (`reload`, above),
+  // activating it purges the old cache, and the page reloads into it on
+  // controllerchange. Network-first made every open wait on a revalidation
+  // per file, and on no signal it waited three seconds before giving up.
+  //
+  // Matched and stored without the query string: the sign-in redirect comes
+  // back as ./?code=..., and a single-use OAuth code has no business sitting
+  // in a cache -- nor would it ever match again if it did.
   event.respondWith((async () => {
-    const network = fetch(event.request, { cache: 'no-cache' }).then((res) => {
+    const hit = await caches.match(event.request, { ignoreSearch: true });
+    if (hit) return hit;
+    try {
+      const res = await fetch(event.request);
       if (res.ok) {
         const copy = res.clone();
-        caches.open(VERSION).then((cache) => cache.put(event.request, copy));
+        caches.open(VERSION).then((cache) => cache.put(url.origin + url.pathname, copy));
       }
       return res;
-    });
-    const hit = await caches.match(event.request);
-    if (!hit) return network.catch(() => caches.match('./index.html'));
-    const late = new Promise((resolve) => setTimeout(() => resolve(hit), WAIT));
-    return Promise.race([network.catch(() => hit), late]);
+    } catch (err) {
+      const shell = await caches.match('./index.html');
+      if (shell) return shell;
+      throw err;
+    }
   })());
 });

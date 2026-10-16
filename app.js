@@ -7,6 +7,14 @@ import * as graph from './graph.js';
 
 const $ = (sel) => document.querySelector(sel);
 
+/**
+ * One collator for every comparison a sort makes. `localeCompare` with options
+ * builds the locale machinery afresh on each call, and a sort of a flattened
+ * library is hundreds of thousands of calls -- a measurable pause on a phone,
+ * paid on every render.
+ */
+const collate = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare;
+
 const state = {
   account: null,
   stack: [],          // [{ driveId, itemId, name }] — the trail from the root
@@ -34,8 +42,9 @@ const state = {
   playingId: null,    // which video the player has open, for swipe-to-next
   selecting: false,   // selection mode: taps toggle instead of scrubbing
   cardWidth: 320,     // per-device, not a judgement about a video; the CSS default
-  pageSize: 200,
   loading: false,     // a folder is still streaming in
+  skipped: 0,         // folders the flattened walk gave up on, said in the count line
+  offline: false,     // the listing on screen is the saved copy, not the network's
   selected: new Set(), // item ids
 };
 
@@ -160,10 +169,10 @@ function setBusy(text) {
 
 // ------------------------------------------------------------------ library
 
-const EMPTY_RECORD = {
-  rating: 0, tags: [], models: [], studio: '', production: '', url: '',
+const EMPTY_RECORD = Object.freeze({
+  rating: 0, tags: [], models: [], notModels: [], studio: '', production: '', url: '',
   resume: 0, updated: 0,
-};
+});
 
 /**
  * Fields with exactly one value, as against a list of them.
@@ -181,13 +190,53 @@ function valuesOf(record, field) {
   return record[field] ? [record[field]] : [];
 }
 
+/**
+ * Which version of the labels everything derived from them was worked out
+ * against. Bumped by every change -- an edit, a favourite, a fresh read, a
+ * merge adopted from a save -- so a memo only has to compare one number.
+ */
+let libVersion = 0;
+
+function libraryChanged(key = null) {
+  libVersion += 1;
+  if (key === null) recordCache.clear();
+  else recordCache.delete(key);
+}
+
+/**
+ * Normalised records, made once each. A sort asks for the same record dozens
+ * of times and every one of those built a fresh object; they are shared
+ * now, so nothing may mutate what recordFor hands back.
+ *
+ * Tied to the records object as well as to the version: a library replaced
+ * wholesale (a read, a merge) is a different object, and that alone clears it.
+ */
+const recordCache = new Map(); // record key -> normalised record
+let recordCacheFor = null;
+
 function recordFor(video) {
-  const record = state.library.records[graph.recordKey(video)];
+  const key = graph.recordKey(video);
+  const records = state.library.records;
+  if (recordCacheFor !== records) {
+    recordCache.clear();
+    recordCacheFor = records;
+  }
+  const hit = recordCache.get(key);
+  if (hit) return hit;
+  const made = makeRecord(records[key]);
+  recordCache.set(key, made);
+  return made;
+}
+
+function makeRecord(record) {
   if (!record) return EMPTY_RECORD;
   return {
     rating: record.rating || 0,
     tags: record.tags || [],
     models: record.models || [],
+    // Names turned down for this video: the desktop's answer to a face
+    // suggestion, "not her", kept so the same name is not offered again.
+    notModels: record.notModels || [],
     studio: record.studio || '',
     // The reference's letter code — the series within the house.
     production: record.production || '',
@@ -233,7 +282,11 @@ function suggestionMatch(video, want) {
   // two it is, and only one of them has work left in it.
   const faceless = facelessKeys().has(graph.recordKey(video));
   if (want === 'faceless') return faceless;
-  const named = new Set((recordFor(video).models || []).map((m) => m.toLowerCase()));
+  // A name turned down is as settled as one credited: both are a decision
+  // made about that suggestion, which is what the desktop counts too.
+  const record = recordFor(video);
+  const named = new Set([...(record.models || []), ...(record.notModels || [])]
+    .map((m) => String(m).toLowerCase()));
   const settled = suggested.length > 0
     && suggested.every((s) => named.has(String(s.name).toLowerCase()));
   if (want === 'nomatch') return !faceless && !settled;
@@ -406,9 +459,10 @@ function editRecord(video, patch) {
   // The desktop's shapes, so a record written here reads the same there: lists
   // deduped and sorted, the studio a single trimmed string, a url only if it is
   // one the app would be willing to open.
-  for (const field of ['tags', 'models']) {
+  for (const field of ['tags', 'models', 'notModels']) {
     if (Array.isArray(next[field])) next[field] = normaliseList(next[field]);
   }
+  if (next.notModels && !next.notModels.length) delete next.notModels;
   if (next.studio !== undefined) {
     next.studio = String(next.studio || '').trim().replace(/\s+/g, ' ').slice(0, 80);
   }
@@ -423,10 +477,15 @@ function editRecord(video, patch) {
   }
 
   // An empty record is noise in a file that syncs; match the desktop and drop it.
+  // A turned-down name counts as content, as it does there: dropping the record
+  // would hand the same suggestion straight back. So does a bookmark, which
+  // the phone does not draw but must not throw away.
   if (!next.rating && !(next.tags || []).length && !(next.models || []).length
+    && !(next.notModels || []).length && !(next.marks || []).length
     && !next.studio && !next.production && !next.url && !next.resume) {
     delete state.library.records[key];
   } else state.library.records[key] = next;
+  libraryChanged(key);
   state.dirty = true;
   scheduleSave();
 }
@@ -517,6 +576,33 @@ function buildStarRow(current, onPick, className = 'stars') {
   return wrap;
 }
 
+/**
+ * The same five stars, to read rather than press.
+ *
+ * On a card each half-star was a target about nine pixels wide, under a thumb
+ * that had come to scroll -- ratings changed by accident far more often than
+ * on purpose. The player's stars are twice the size and are where rating
+ * happens; a card only says what the rating is. `onTap`, when given, makes the
+ * whole row one target for something bigger (the selection's labels sheet).
+ */
+function buildStarDisplay(current, onTap = null, className = 'stars') {
+  const wrap = document.createElement(onTap ? 'button' : 'span');
+  wrap.className = className + ' read-only';
+  if (onTap) {
+    wrap.type = 'button';
+    wrap.title = 'Rate in the labels sheet';
+    wrap.addEventListener('click', (ev) => { ev.stopPropagation(); onTap(); });
+  }
+  wrap.setAttribute('aria-label', current ? `Rated ${starsNumber(current)} of 5` : 'Unrated');
+  for (let i = 1; i <= RATING_MAX / 2; i += 1) {
+    const star = document.createElement('span');
+    star.className = 'star';
+    wrap.appendChild(star);
+  }
+  paintStarRow(wrap, current);
+  return wrap;
+}
+
 
 /**
  * The same once-only move the desktop makes when it opens the file: a library
@@ -538,6 +624,7 @@ async function readLibrary() {
   try {
     state.library = toTenStars(await graph.loadLibrary());
     state.libraryLoaded = true;
+    libraryChanged();
     graph.noteLoaded(state.library);
     // A read that only succeeded on the second attempt has cards on screen
     // already, drawn without their ratings.
@@ -549,6 +636,7 @@ async function readLibrary() {
     graph.loadSuggestions().then((faces) => {
       if (!faces) return;
       state.faces = faces;
+      libraryChanged(); // the Faces filter reads these
       if (state.videos.length) render();
     }).catch(() => {});
     // And the preview cache's geometry, without which a strip cannot be named.
@@ -564,6 +652,20 @@ async function readLibrary() {
     return true;
   } catch (err) {
     state.libraryLoaded = false;
+    if (err.offline) {
+      // No signal: the copy this phone last held, shown but never written --
+      // libraryLoaded stays false, so editRecord refuses and asks again,
+      // and coming back to the app with signal reads the real one.
+      if (err.library) {
+        state.library = toTenStars(err.library);
+        libraryChanged();
+        if (state.videos.length) render();
+        toast('Offline — showing saved labels', 'err');
+      } else {
+        toast('Offline — labels will load when the signal is back', 'err');
+      }
+      return false;
+    }
     toast(`${err.message} — labels are read-only until this works`, 'err');
     return false;
   }
@@ -587,25 +689,59 @@ function scheduleSave() {
   if (!dirtySince) dirtySince = Date.now();
   clearTimeout(saveTimer);
   const waited = Date.now() - dirtySince;
-  saveTimer = setTimeout(async () => {
-    if (!state.libraryLoaded) return;
-    try {
-      await saveAndAdopt();
-      dirtySince = 0;
-    } catch (err) {
-      dirtySince = 0;
-      toast(err.message, 'err');
-    }
-  }, Math.max(0, Math.min(SAVE_AFTER_MS, SAVE_AT_MOST_MS - waited)));
+  saveTimer = setTimeout(runSave, Math.max(0, Math.min(SAVE_AFTER_MS, SAVE_AT_MOST_MS - waited)));
+}
+
+/**
+ * A failed save tries again by itself, further apart each time.
+ *
+ * It used to toast and stop, leaving the edits dirty in memory with nothing
+ * coming to write them: unless another star was pressed, or the app went to
+ * the background, they were lost when the tab was. Two seconds, then four, up
+ * to a minute between tries; one toast for the run of failures rather than one
+ * per try. A refusal that would only repeat (the empty-library guard) stops.
+ */
+const SAVE_RETRY_FIRST_MS = 2000;
+const SAVE_RETRY_MAX_MS = 60000;
+let saveFailures = 0;
+
+async function runSave() {
+  saveTimer = null;
+  if (!state.libraryLoaded || !state.dirty) return;
+  try {
+    await saveAndAdopt();
+    dirtySince = 0;
+    if (saveFailures) toast('Labels saved', 'ok');
+    saveFailures = 0;
+  } catch (err) {
+    dirtySince = 0;
+    // saveAndAdopt has put state.dirty back; nothing is lost by waiting.
+    if (err.permanent) { toast(err.message, 'err'); return; }
+    saveFailures += 1;
+    if (saveFailures === 1) toast(`${err.message} — will keep trying`, 'err');
+    const wait = Math.min(SAVE_RETRY_MAX_MS, SAVE_RETRY_FIRST_MS * 2 ** (saveFailures - 1));
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(runSave, wait);
+  }
 }
 
 // A pending edit must not be lost to a backgrounded tab — and coming back is
 // the natural moment to retry a read that failed, since a phone that has been
 // in a pocket has usually found signal again by now.
 window.addEventListener('visibilitychange', () => {
+  // Where the open video stands, written now: going to the background is
+  // often the last chance this tab gets. Not on every tick of playback --
+  // each save is the whole library up a phone's mobile data.
+  if (document.visibilityState === 'hidden') notePlaybackPosition();
+  // Through runSave, so a save that fails here still re-arms its retry.
   if (document.visibilityState === 'hidden' && state.dirty && state.libraryLoaded) {
     clearTimeout(saveTimer);
-    saveAndAdopt().catch(() => {});
+    runSave();
+  }
+  // Back with a save still waiting out its backoff: signal is likeliest now.
+  if (document.visibilityState === 'visible' && state.dirty && state.libraryLoaded && saveFailures) {
+    clearTimeout(saveTimer);
+    runSave();
   }
   if (document.visibilityState === 'visible' && !state.libraryLoaded) readLibrary();
   // Back after a while with nothing unsaved: the desktop may have labelled
@@ -634,6 +770,7 @@ async function saveAndAdopt() {
   }
   if (saved !== sent) {
     state.library = graph.mergeLibraries(sent, state.library, saved);
+    libraryChanged();
     graph.noteLoaded(state.library);
     if (state.videos.length) render();
   }
@@ -654,32 +791,78 @@ async function openFolder(entry, { push = true } = {}) {
     if (entry) state.stack.push(entry);
     else state.stack = [];
   }
+  // Something for Back to walk up out of.
+  if (state.stack.length) armTrap();
   state.folders = [];
   state.videos = [];
   state.next = null;
   state.queue = [];
   state.walk = null;
+  state.skipped = 0;
+  state.offline = false;
   render();
   window.scrollTo(0, 0);
   setBusy('Loading…');
 
   const driveId = entry ? entry.driveId : null;
   const itemId = entry ? entry.itemId : null;
-  state.source = { driveId, itemId, run };
+  state.source = { driveId, itemId, run, saveKey: listingKey(itemId) };
   // Flattened, the listing is a walk that starts here and works downwards.
   if (state.flatten) state.walk = { driveId, itemId, next: null };
 
   // Folders and videos are separate queries with different orderings, so they
   // run side by side rather than one behind the other.
-  graph.listFolders(driveId, itemId).then((folders) => {
+  let foldersOk = false;
+  const folders = graph.listFolders(driveId, itemId).then((found) => {
     if (state.load !== run) return;
-    state.folders = atRoot() ? folders.filter(isLibraryFolder) : folders;
+    state.folders = atRoot() ? found.filter(isLibraryFolder) : found;
+    foldersOk = true;
     renderFolders();
   }).catch((err) => {
-    if (state.load === run) toast(err.message, 'err');
+    if (state.load !== run) return;
+    if (graph.isOffline(err)) useSavedListing(run);
+    else toast(err.message, 'err');
   });
 
-  await loadMore();
+  const complete = await loadMore();
+  await folders;
+  // The whole of it arrived: kept, for the next time there is no signal.
+  if (complete && foldersOk && state.load === run && !state.offline) {
+    graph.kvSet(state.source.saveKey, { folders: state.folders, videos: state.videos }).catch(() => {});
+  }
+}
+
+/** Where a folder's last listing is kept: flattened or not are different lists. */
+function listingKey(itemId) {
+  return `folder:${itemId || 'root'}${state.flatten ? ':flat' : ''}`;
+}
+
+/**
+ * No network: the last listing this phone saw of the folder, if it ever saw
+ * one, rather than an empty grid and an error. Said so, since it may be out of
+ * date and none of it will play until the signal is back.
+ */
+let offlineTried = null;
+
+async function useSavedListing(run) {
+  if (offlineTried === run) return; // folders and videos both fail; one answer
+  offlineTried = run;
+  const saved = await graph.kvGet(state.source.saveKey);
+  if (state.load !== run) return;
+  if (!saved || !Array.isArray(saved.videos)) {
+    toast('Offline — nothing saved for this folder yet', 'err');
+    return;
+  }
+  state.offline = true;
+  state.folders = saved.folders || [];
+  state.videos = saved.videos;
+  state.next = null;
+  state.walk = null;
+  state.queue = [];
+  setBusy('');
+  gridKey = '';
+  render();
+  toast('Offline — showing the last listing saved here', 'err');
 }
 
 /**
@@ -720,35 +903,66 @@ function moreToLoad() {
  * to be asked. It used to stop at three pages behind a "Load more" button,
  * which on a five-thousand-video folder meant most of it was simply not there.
  */
+/**
+ * A folder the walk could not read goes to the back of the queue, not straight
+ * into the next round: Graph has already retried anything throttled inside the
+ * batch, so what reaches here is a folder that needs longer -- 1s, then 2s,
+ * then it is skipped and counted.
+ */
+const SPOT_RETRIES = 2;
+const spotDue = (spot) => !spot.notBefore || spot.notBefore <= Date.now();
+
 async function loadMore() {
   const { driveId, itemId, run } = state.source;
 
   state.loading = true;
   try {
     do {
-      if (state.flatten && !state.walk) return; // the walk finished
+      if (state.flatten && !state.walk) return state.skipped === 0; // the walk finished
       if (state.flatten) {
+        // Only folders backing off left: wait for the first of them, rather
+        // than asking again for something Graph has just refused.
+        if (!spotDue(state.walk)) {
+          const at = state.queue.findIndex(spotDue);
+          if (at >= 0) {
+            const due = state.queue.splice(at, 1)[0];
+            state.queue.push(state.walk);
+            state.walk = due;
+          } else {
+            const soonest = Math.min(state.walk.notBefore,
+              ...state.queue.map((s) => s.notBefore || 0));
+            await new Promise((done) => setTimeout(done, Math.max(0, soonest - Date.now())));
+            if (state.load !== run) return false;
+            continue;
+          }
+        }
         // A level at a time, twenty folders per round trip, through $batch:
         // one folder per round trip was the measured minute on a library
         // folder of five thousand.
         const round = [state.walk];
+        const later = []; // backing off, kept in their place for a later round
         while (round.length < graph.BATCH && state.queue.length) {
           const spot = state.queue.shift();
+          if (!spotDue(spot)) { later.push(spot); continue; }
           if (!('next' in spot)) spot.next = null;
           round.push(spot);
         }
+        state.queue.unshift(...later);
         const pages = await graph.listChildrenBatch(round);
         // A folder tapped while this one was still streaming wins; anything
         // this loop produces from here belongs to a screen the user has left.
-        if (state.load !== run) return;
+        if (state.load !== run) return false;
 
         const going = []; // folders with pages still to fetch, kept at the front
         pages.forEach((page, i) => {
           const spot = round[i];
           if (page.failed) {
-            // Once more before giving up on it -- a 429 is a bad moment rather
-            // than a bad folder -- then that folder alone is the cost.
-            if (!spot.tried) state.queue.push({ ...spot, tried: true });
+            const tries = (spot.tries || 0) + 1;
+            if (tries <= SPOT_RETRIES) {
+              state.queue.push({ ...spot, tries, notBefore: Date.now() + 1000 * 2 ** (tries - 1) });
+            } else {
+              state.skipped += 1; // that folder alone is the cost, and it is said
+            }
             return;
           }
           for (const video of page.videos) video.folderName = spot.name || '';
@@ -766,18 +980,26 @@ async function loadMore() {
         if (state.walk && !('next' in state.walk)) state.walk.next = null;
       } else {
         const page = await graph.listPage(driveId, itemId, state.next);
-        if (state.load !== run) return;
+        if (state.load !== run) return false;
         state.videos.push(...page.videos);
         state.next = page.next;
       }
       renderSoon();
       setBusy(moreToLoad() ? `Loading… ${state.videos.length} so far` : '');
     } while (moreToLoad());
+    // Complete unless a folder had to be skipped: a listing with holes in it
+    // is not one worth keeping as "the last listing of this folder".
+    return state.skipped === 0;
   } catch (err) {
     if (state.load === run) {
-      toast(err.message, 'err');
       setBusy('');
+      // Nothing came at all, for want of a network: the saved copy instead.
+      // Part of a folder and then the signal going is left as it is, with the
+      // button that picks the load back up.
+      if (graph.isOffline(err) && !state.videos.length) useSavedListing(run);
+      else toast(err.message, 'err');
     }
+    return false;
   } finally {
     // Whether it finished or stopped on an error, it is no longer running --
     // and the button that offers to pick it up again is shown on that.
@@ -806,6 +1028,22 @@ function pushTrap() {
   if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
 }
 
+/**
+ * One trap at a time, and only while Back has something to undo.
+ *
+ * It used to be pushed again on every Back, unconditionally -- so at the root,
+ * with nothing open, Back did nothing at all and the app could not be left
+ * with it. Now the trap is armed when there is something to walk out of (a
+ * folder, an overlay, a selection) and re-armed only while there still is.
+ */
+let trapArmed = false;
+
+function armTrap() {
+  if (trapArmed) return;
+  trapArmed = true;
+  pushTrap();
+}
+
 async function goUp() {
   if (!state.stack.length) return;
   state.stack.pop();
@@ -830,7 +1068,33 @@ async function goUp() {
  * Pinned rather than `overflow: hidden`, which iOS does not honour on the body.
  * The offset is handed back on the way out, so the listing is where it was.
  */
-const OVERLAYS = ['#player', '#adv', '#labels', '#picker', '#lineup'];
+/**
+ * Every overlay, once: innermost first -- the order Back unwinds them in, the
+ * same order Escape uses on the desktop. The lineup opens over the player and
+ * the labels sheet from it, so either closes before the player does. Each says
+ * how it closes, since the player and the lineup have more to undo than the
+ * hidden attribute.
+ */
+const OVERLAYS = [
+  { sel: '#lineup', close: () => closeLineup() },
+  { sel: '#labels', close: () => { $('#labels').hidden = true; } },
+  { sel: '#adv', close: () => { $('#adv').hidden = true; } },
+  { sel: '#picker', close: () => { $('#picker').hidden = true; } },
+  { sel: '#player', close: () => closePlayer() },
+];
+
+/** The innermost overlay showing, or null. */
+function openOverlay() {
+  return OVERLAYS.find(({ sel }) => {
+    const el = $(sel);
+    return el && !el.hidden;
+  }) || null;
+}
+
+function overlayOpen() {
+  return Boolean(openOverlay());
+}
+
 let pinnedAt = null;
 
 // While it is pinned the window sits at zero, so anything that wants to know
@@ -840,10 +1104,9 @@ function pageScrollY() {
 }
 
 function syncPagePin() {
-  const open = OVERLAYS.some((sel) => {
-    const el = $(sel);
-    return el && !el.hidden;
-  });
+  const open = overlayOpen();
+  // Whatever opened it, Back now has something to close.
+  if (open) armTrap();
   if (open === (pinnedAt !== null)) return; // an overlay over an overlay changes nothing
   if (open) {
     pinnedAt = window.scrollY;
@@ -863,25 +1126,26 @@ function syncPagePin() {
 // next one added.
 function watchOverlays() {
   const spy = new MutationObserver(syncPagePin);
-  for (const sel of OVERLAYS) {
+  for (const { sel } of OVERLAYS) {
     const el = $(sel);
     if (el) spy.observe(el, { attributes: true, attributeFilter: ['hidden'] });
   }
 }
 
-// Android's back button should walk the folder trail, not leave the app.
+// Android's back button should walk the folder trail, not leave the app --
+// until there is no trail left to walk, and then it should.
 window.addEventListener('popstate', () => {
-  // Unwind one layer at a time, innermost first — the same order Escape uses on
-  // the desktop, so back never leaves the app while something is still open.
-  pushTrap();
-  // Innermost first: the lineup opens over the player, so back leaves the
-  // player where it was rather than closing both at once.
-  if (!$('#lineup').hidden) { closeLineup(); return; }
-  if (!$('#adv').hidden) { $('#adv').hidden = true; return; }
-  if (!$('#picker').hidden) { $('#picker').hidden = true; return; }
-  if (!$('#player').hidden) { closePlayer(); return; }
-  if (state.selecting) { exitSelection(); return; }
-  if (state.stack.length) goUp();
+  trapArmed = false; // this Back just used it
+  // Unwind one layer at a time, innermost first, so back never leaves the app
+  // while something is still open.
+  const top = openOverlay();
+  if (top) top.close();
+  else if (state.selecting) exitSelection();
+  else if (state.stack.length) goUp();
+  else return; // the root, nothing open: the next Back leaves
+  // Still something under that? Then the next Back is ours too. (goUp pops
+  // the stack before its first await, so the length is already the new one.)
+  if (overlayOpen() || state.selecting || state.stack.length) armTrap();
 });
 
 /**
@@ -978,7 +1242,35 @@ function renderFolders() {
   }
 }
 
+/**
+ * The listing as shown, worked out once per change rather than once per ask.
+ *
+ * A render asks for it, then the player asks on every swipe, arrow, edit and
+ * prime -- and each ask was a fresh filter and sort of every video in the
+ * folder, twenty-seven thousand flattened. Remembered against everything it
+ * depends on: the list (by identity and length, since pages are pushed into
+ * it), the search, the filter in force, the sort, whether the listing is still
+ * streaming, and the version of the labels. The answer is shared; nothing may
+ * mutate it.
+ */
+let shownMemo = { key: null, list: null, out: null };
+
+function advSignature(f = adv) {
+  return JSON.stringify(Object.entries(f).map(([k, v]) => [k, v instanceof Map ? [...v] : v]));
+}
+
 function filterByName(list) {
+  const streaming = state.loading && moreToLoad();
+  const key = list === state.videos
+    ? [list.length, state.query, advSignature(), state.sort, state.sortDir, streaming, libVersion].join('\u0001')
+    : null;
+  if (key !== null && shownMemo.list === list && shownMemo.key === key) return shownMemo.out;
+  const out = filterAndSort(list, streaming);
+  if (key !== null) shownMemo = { key, list, out };
+  return out;
+}
+
+function filterAndSort(list, streaming) {
   const terms = state.query.split(/\s+/).filter(Boolean);
   let out = list;
   if (terms.length) {
@@ -1003,7 +1295,7 @@ function filterByName(list) {
   // rebuilt from scratch on every page. Flattening the library under a rating
   // sort is a thousand pages, and so a thousand rebuilds of a grid that ends up
   // thousands of cards long. Sorted once at the end instead, where it costs one.
-  if (state.loading && moreToLoad()) return out;
+  if (streaming) return out === list ? list.slice() : out;
   return sortVideos(out);
 }
 
@@ -1027,7 +1319,7 @@ function firstAlphabetically(values) {
   for (const raw of values || []) {
     const value = String(raw).trim();
     if (!value) continue;
-    if (!best || value.localeCompare(best, undefined, { sensitivity: 'base' }) < 0) best = value;
+    if (!best || collate(value, best) < 0) best = value;
   }
   return best;
 }
@@ -1041,42 +1333,58 @@ function touchedAt(video) {
   return Math.max(Number(video.mtime) || 0, Number(recordFor(video).updated) || 0);
 }
 
+/**
+ * What a video sorts by, read once per sort rather than twice per comparison:
+ * a sort of n videos compares about n·log n times, and every comparison was
+ * looking the record up again.
+ */
+function sortValue(video, key) {
+  if (key === 'mtime') return touchedAt(video);
+  if (key === 'rating') return recordFor(video).rating || 0;
+  if (LABEL_SORTS[key]) return LABEL_SORTS[key](video);
+  if (key === 'folder') return String(video.folderName || '');
+  if (key === 'name') return video.name;
+  return Number(video[key]) || 0;
+}
+
 function sortVideos(list) {
   const dir = state.sortDir === 'asc' ? 1 : -1;
   const key = state.sort;
+  const values = new Map();
+  for (const item of list) if (!item.isFolder) values.set(item, sortValue(item, key));
+  const byName = (a, b) => collate(a.name, b.name);
   return list.slice().sort((a, b) => {
     if (a.isFolder || b.isFolder) return 0;
+    const av = values.get(a);
+    const bv = values.get(b);
     let cmp;
     if (key === 'name') {
-      cmp = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+      cmp = collate(av, bv);
     } else if (key === 'mtime') {
-      cmp = touchedAt(a) - touchedAt(b);
-      if (cmp === 0) return a.name.localeCompare(b.name, undefined, { numeric: true });
+      cmp = av - bv;
+      if (cmp === 0) return byName(a, b);
     } else if (key === 'rating') {
-      cmp = (recordFor(a).rating || 0) - (recordFor(b).rating || 0);
+      cmp = av - bv;
       // Returned unflipped: within one rating band names should read A→Z
       // whichever way the ratings point, or the unrated bulk comes out backwards.
-      if (cmp === 0) return a.name.localeCompare(b.name, undefined, { numeric: true });
+      if (cmp === 0) return byName(a, b);
     } else if (LABEL_SORTS[key]) {
       // By a label: its first value, since a video has one studio but any
       // number of performers. Unlabelled last whichever way the arrow points,
       // like the unrated — reversing should bring the labelled tail up, not a
       // wall of blanks.
-      const av = LABEL_SORTS[key](a);
-      const bv = LABEL_SORTS[key](b);
-      if (!av && !bv) return a.name.localeCompare(b.name, undefined, { numeric: true });
+      if (!av && !bv) return byName(a, b);
       if (!av) return 1;
       if (!bv) return -1;
-      cmp = av.localeCompare(bv, undefined, { numeric: true, sensitivity: 'base' });
-      if (cmp === 0) return a.name.localeCompare(b.name, undefined, { numeric: true });
+      cmp = collate(av, bv);
+      if (cmp === 0) return byName(a, b);
     } else if (key === 'folder') {
       // Only meaningful flattened, which is the only time a listing mixes
       // folders — and within one folder it falls back to the name.
-      cmp = String(a.folderName || '').localeCompare(String(b.folderName || ''),
-        undefined, { numeric: true, sensitivity: 'base' });
-      if (cmp === 0) return a.name.localeCompare(b.name, undefined, { numeric: true });
+      cmp = collate(av, bv);
+      if (cmp === 0) return byName(a, b);
     } else {
-      cmp = (Number(a[key]) || 0) - (Number(b[key]) || 0);
+      cmp = av - bv;
     }
     return cmp * dir;
   });
@@ -1138,8 +1446,15 @@ function buildModelGroups(list, mode = 'models') {
     //
     // Only the ones at the floor, matching the desktop: a section built from
     // guesses that weak is a performer you cannot act on.
+    //
+    // Nor anyone turned down for this video: "not her" is an answer, and a
+    // section built on a refused guess is the desktop's rule broken here.
+    const refused = guessed && record.notModels.length
+      ? new Set(record.notModels.map((n) => String(n).toLowerCase())) : null;
     const names = (guessed
-      ? facesFor(video).suggested.filter((s) => s.score >= FACE_FLOOR).map((s) => s.name)
+      ? facesFor(video).suggested
+        .filter((s) => s.score >= FACE_FLOOR && !(refused && refused.has(String(s.name).toLowerCase())))
+        .map((s) => s.name)
       : (record.models || [])).map((n) => String(n).trim()).filter(Boolean);
     if (!names.length) { unnamed.push(video); continue; }
     const rating = Math.max(0, Math.min(RATING_MAX, Math.round(Number(record.rating) || 0)));
@@ -1156,9 +1471,10 @@ function buildModelGroups(list, mode = 'models') {
     }
   }
 
+  const { favs } = personIndex(); // once for the pass, not per comparison
   const out = [...groups.values()].sort((a, b) => {
-    const fa = isFavouriteModel(a.name) ? 0 : 1;
-    const fb = isFavouriteModel(b.name) ? 0 : 1;
+    const fa = favs.has(a.key) ? 0 : 1;
+    const fb = favs.has(b.key) ? 0 : 1;
     // Marked first — that is what makes this a favourites view rather than a
     // leaderboard — then the Top performers order among the rest. Ties go to
     // whoever has more well-rated videos, since ten fours and one five score
@@ -1166,7 +1482,7 @@ function buildModelGroups(list, mode = 'models') {
     return fa - fb
       || b.points - a.points
       || b.good - a.good
-      || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+      || collate(a.name, b.name);
   });
   if (unnamed.length) {
     out.push({
@@ -1196,12 +1512,40 @@ function buildGroupHead(group) {
 
   if (!group.unnamed) {
     const marked = isFavouriteModel(group.name);
+    const tier = marked ? favouriteTier(group.name) : 0;
     const heart = document.createElement('button');
     heart.className = 'group-fav' + (marked ? ' on' : '');
     heart.textContent = marked ? '\u2665' : '\u2661';
+    if (marked) {
+      const sup = document.createElement('sup');
+      sup.className = 'group-tier';
+      sup.textContent = String(tier);
+      heart.appendChild(sup);
+    }
     heart.setAttribute('aria-label', marked ? `Unmark ${group.name}` : `Mark ${group.name}`);
+    heart.title = marked ? `Tier ${tier} \u2014 hold to change the tier` : 'Tap to mark, hold to pick a tier';
+    // Hold for a tier, the desktop's 1-5. A press that became a hold must not
+    // also land as the tap that toggles.
+    let hold = null;
+    let held = false;
+    const cancelHold = () => { clearTimeout(hold); hold = null; };
+    heart.addEventListener('pointerdown', () => {
+      held = false;
+      cancelHold();
+      hold = setTimeout(() => {
+        hold = null;
+        held = true;
+        if (navigator.vibrate) navigator.vibrate(12);
+        openTierMenu(heart, group.name);
+      }, 480);
+    });
+    heart.addEventListener('pointerup', cancelHold);
+    heart.addEventListener('pointercancel', cancelHold);
+    heart.addEventListener('pointerleave', cancelHold);
+    heart.addEventListener('contextmenu', (ev) => ev.preventDefault());
     heart.addEventListener('click', (ev) => {
       ev.stopPropagation();
+      if (held) { held = false; return; }
       const on = toggleFavouriteModel(group.name);
       toast(on ? `${group.name} marked a favourite` : `${group.name} unmarked`, 'ok');
       gridKey = ''; // favourites lead, so this section has moved
@@ -1342,6 +1686,10 @@ function renderVideos() {
     ? `${cards} ${noun}${cards === 1 ? '' : 's'}`
       + (state.grouped ? ` in ${state.groups.length} section${state.groups.length === 1 ? '' : 's'}` : '')
       + (moreToLoad() ? ' so far' : '')
+      // Said, not hidden: a folder the walk gave up on is videos missing from
+      // this count, and pull-to-refresh is the way to go back for them.
+      + (state.skipped ? ` · ${state.skipped} folder${state.skipped === 1 ? '' : 's'} skipped` : '')
+      + (state.offline ? ' · saved copy, offline' : '')
     : (moreToLoad() ? 'Loading…' : 'No videos here');
 
   // Nothing is left to press: a folder loads all the way through on its own.
@@ -1376,6 +1724,7 @@ function enterSelection(video, card) {
   // immediately deselect the card the press just selected.
   card.classList.add('just-picked');
   if (navigator.vibrate) navigator.vibrate(12);
+  armTrap(); // Back leaves the selection before anything else
   updateSelectionBar();
 }
 
@@ -1403,12 +1752,9 @@ function updateSelectionBar() {
   const uniform = picked.every((v) => (recordFor(v).rating || 0) === first);
   const stars = $('#selStars');
   stars.innerHTML = '';
-  const row = buildStarRow(uniform ? first : 0, (rating) => {
-    for (const video of picked) editRecord(video, { rating });
-    render();
-    updateSelectionBar();
-  });
-  stars.appendChild(row);
+  // Read out, and a tap opens the labels sheet, whose stars are big enough
+  // for a thumb and rate the whole selection the same way.
+  stars.appendChild(buildStarDisplay(uniform ? first : 0, tagSelection));
 }
 
 function tagSelection() {
@@ -1437,6 +1783,7 @@ async function deleteSelection() {
     try {
       await graph.deleteItem(video);
       delete state.library.records[graph.recordKey(video)];
+      libraryChanged(graph.recordKey(video));
       state.dirty = true;
       state.videos = state.videos.filter((v) => v.id !== video.id);
       state.selected.delete(video.id);
@@ -1455,9 +1802,11 @@ async function deleteSelection() {
 }
 
 /**
- * How wide a card is, and how much a "load more" fetches. Both are per-device
- * rather than shared through the sidecar: a phone and a desktop browser want
- * different answers, and the sidecar is for judgements about videos.
+ * How wide a card is: per-device rather than shared through the sidecar, since a
+ * phone and a desktop browser want different answers and the sidecar is for
+ * judgements about videos. Only read now -- the screen that set it has gone --
+ * so a width chosen back then still applies. The page size it also held is
+ * gone: it pinned listings at 200 a page where Graph will serve 999.
  */
 const SETTINGS_KEY = 've.settings';
 
@@ -1465,10 +1814,8 @@ function loadSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     if (Number(saved.cardWidth)) state.cardWidth = Number(saved.cardWidth);
-    if (Number(saved.pageSize)) state.pageSize = Number(saved.pageSize);
   } catch { /* first run, or storage blocked */ }
   applyCardWidth();
-  graph.setPageSize(state.pageSize);
 }
 function applyCardWidth() {
   document.documentElement.style.setProperty('--card-width', state.cardWidth + 'px');
@@ -1495,12 +1842,46 @@ function favouriteModels() {
   return (state.library.favourites || []).slice();
 }
 
-function isFavouriteModel(name) {
-  const key = String(name || '').trim().toLowerCase();
-  return !!key && favouriteModels().some((m) => String(m).toLowerCase() === key);
+/**
+ * The per-performer lookups, built once per version of the labels rather than
+ * once per video: the favourites as a Set, the races, the traits and the
+ * tiers. The filter asks about every video in the listing, and each ask used
+ * to make a fresh Set of every favourite.
+ */
+let personMemo = { at: -1, lib: null, index: null };
+
+function personIndex() {
+  const lib = state.library || {};
+  if (personMemo.at === libVersion && personMemo.lib === lib) return personMemo.index;
+  const index = {
+    favs: new Set((lib.favourites || []).map((n) => String(n).toLowerCase())),
+    tiers: lib.favouriteTiers || {},
+    races: lib.races || {},
+    traits: lib.traits || {},
+  };
+  personMemo = { at: libVersion, lib, index };
+  return index;
 }
 
-function toggleFavouriteModel(name) {
+function isFavouriteModel(name) {
+  const key = String(name || '').trim().toLowerCase();
+  return !!key && personIndex().favs.has(key);
+}
+
+/** A favourite's tier, 1 (the most) to 5; one with none recorded is a 3, as on the desktop. */
+const TIERS = [1, 2, 3, 4, 5];
+
+function favouriteTier(name) {
+  const held = Number(personIndex().tiers[String(name || '').trim().toLowerCase()]);
+  return TIERS.includes(held) ? held : 3;
+}
+
+/**
+ * Marks or unmarks one performer -- the desktop's setFavouriteModel, kept in
+ * step: `tier` places a favourite (left out, it keeps the one it had), and
+ * unmarking takes the tier with it, so a name marked again later starts afresh.
+ */
+function setFavouriteModel(name, on, tier = null) {
   if (!state.libraryLoaded) {
     toast('Labels have not loaded — retrying, give that another tap', 'err');
     readLibrary();
@@ -1509,15 +1890,77 @@ function toggleFavouriteModel(name) {
   const clean = String(name || '').trim().replace(/\s+/g, ' ').slice(0, 120);
   if (!clean) return false;
   const key = clean.toLowerCase();
-  const on = !isFavouriteModel(clean);
   // Filter then push, so a second marking cannot duplicate a name.
   const list = favouriteModels().filter((m) => String(m).toLowerCase() !== key);
   if (on) list.push(clean);
   list.sort((a, b) => String(a).localeCompare(String(b), undefined, { sensitivity: 'base' }));
   state.library.favourites = list;
+  const tiers = { ...(state.library.favouriteTiers || {}) };
+  if (on && TIERS.includes(Number(tier))) tiers[key] = Number(tier);
+  else if (!on) delete tiers[key];
+  state.library.favouriteTiers = tiers;
+  libraryChanged();
   state.dirty = true;
   scheduleSave();
   return on;
+}
+
+function toggleFavouriteModel(name) {
+  return setFavouriteModel(name, !isFavouriteModel(name));
+}
+
+/**
+ * Tier 1 to 5 for one performer, from a hold on her heart: a small menu by
+ * the heart, gone on any tap outside it. Choosing a tier marks her if she was
+ * not marked; Unmark is there too, so the hold can do everything the tap can.
+ */
+function openTierMenu(anchor, name) {
+  closeTierMenu();
+  const menu = document.createElement('div');
+  menu.className = 'tier-menu';
+  menu.id = 'tierMenu';
+  const marked = isFavouriteModel(name);
+  const current = marked ? favouriteTier(name) : 0;
+  const pick = (tier) => {
+    closeTierMenu();
+    setFavouriteModel(name, tier !== null, tier);
+    toast(tier === null ? `${name} unmarked` : `${name} — tier ${tier}`, 'ok');
+    gridKey = '';
+    render();
+  };
+  for (const tier of TIERS) {
+    const btn = document.createElement('button');
+    btn.className = 'chip' + (tier === current ? ' on' : '');
+    btn.textContent = `Tier ${tier}`;
+    btn.addEventListener('click', (ev) => { ev.stopPropagation(); pick(tier); });
+    menu.appendChild(btn);
+  }
+  if (marked) {
+    const off = document.createElement('button');
+    off.className = 'chip';
+    off.textContent = 'Unmark';
+    off.addEventListener('click', (ev) => { ev.stopPropagation(); pick(null); });
+    menu.appendChild(off);
+  }
+  document.body.appendChild(menu);
+  const box = anchor.getBoundingClientRect();
+  const width = menu.offsetWidth;
+  menu.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, box.left))}px`;
+  menu.style.top = `${box.bottom + 6}px`;
+  // On the next turn, so the release of this very hold does not close it.
+  setTimeout(() => document.addEventListener('pointerdown', tierMenuOutside, true), 0);
+}
+
+function tierMenuOutside(ev) {
+  const menu = $('#tierMenu');
+  if (menu && menu.contains(ev.target)) return;
+  closeTierMenu();
+}
+
+function closeTierMenu() {
+  document.removeEventListener('pointerdown', tierMenuOutside, true);
+  const menu = $('#tierMenu');
+  if (menu) menu.remove();
 }
 
 /**
@@ -1553,7 +1996,38 @@ function newAdvFilter() {
     body: new Map(),
     race: new Map(),
     favourites: new Map(),
+    // What the desktop's face recognition made of a video -- one question with
+    // four answers, each included or excluded like a chip anywhere else.
+    faces: new Map(), // match | nomatch | faceless | unprofiled
   };
+}
+
+/**
+ * The Faces row: suggestionMatch() was written for it, and was left with no
+ * caller when the row came off the panel. Back, as the one face question
+ * worth a filter -- which videos still have a suggestion nobody has answered.
+ */
+const FACE_CHOICES = [
+  ['nomatch', 'someone not credited'],
+  ['match', 'all suggestions answered'],
+  ['faceless', 'no usable face'],
+  ['unprofiled', 'not profiled'],
+];
+
+/**
+ * Included if it matches any included answer, excluded if it matches an
+ * excluded one. Exclusion wins, the way it does for tags.
+ */
+function facesFilterMatch(map, video) {
+  if (!map || !map.size) return true;
+  let wanted = false;
+  let hit = false;
+  for (const [value, mode] of map) {
+    const is = suggestionMatch(video, value);
+    if (mode === 'out' && is) return false;
+    if (mode === 'in') { wanted = true; if (is) hit = true; }
+  }
+  return !wanted || hit;
 }
 
 /**
@@ -1583,18 +2057,17 @@ const PERSON_FIELDS = Object.keys(PERSON_FACETS);
 
 /** One performer facet's values on a video, in that facet's order. */
 function personValues(field, record) {
-  const lib = state.library || {};
-  const favs = new Set((lib.favourites || []).map((n) => String(n).toLowerCase()));
+  const { favs, tiers, races, traits } = personIndex();
   const have = new Set();
   for (const raw of record.models || []) {
     const name = String(raw).trim().toLowerCase();
     if (field === 'race') {
-      const race = (lib.races || {})[name];
+      const race = races[name];
       if (race) have.add(race);
     } else if (field === 'favourites') {
-      if (favs.has(name)) have.add(`Tier ${(lib.favouriteTiers || {})[name] || 3}`);
+      if (favs.has(name)) have.add(`Tier ${TIERS.includes(Number(tiers[name])) ? Number(tiers[name]) : 3}`);
     } else {
-      const value = ((lib.traits || {})[name] || {})[field];
+      const value = (traits[name] || {})[field];
       for (const v of Array.isArray(value) ? value : (value ? [value] : [])) have.add(v);
     }
   }
@@ -1608,7 +2081,7 @@ function personValues(field, record) {
  */
 const NOTHING = '\u0000';
 
-const FACETS = ['tags', 'models', 'ratings'].concat(PERSON_FIELDS);
+const FACETS = ['tags', 'models', 'ratings', 'faces'].concat(PERSON_FIELDS);
 
 let adv = newAdvFilter();
 let advDraft = newAdvFilter();
@@ -1624,7 +2097,26 @@ function picked(facet, want) {
 }
 
 /** Everything in use for a field across the whole library, not just this folder. */
+/**
+ * Both remembered per version of the labels: the labels sheet asks on every
+ * keystroke, and each ask walked every record in the library. Shared answers --
+ * callers read them and never sort or splice them in place.
+ */
+const vocabMemo = new Map(); // `${by}:${field}` -> { at, out }
+
+function memoVocab(id, make) {
+  const hit = vocabMemo.get(id);
+  if (hit && hit.at === libVersion) return hit.out;
+  const out = make();
+  vocabMemo.set(id, { at: libVersion, out });
+  return out;
+}
+
 function vocabulary(field = 'tags') {
+  return memoVocab(`count:${field}`, () => countVocabulary(field));
+}
+
+function countVocabulary(field) {
   const counts = new Map();
   for (const record of Object.values(state.library.records || {})) {
     for (const tag of valuesOf(record, field)) {
@@ -1639,8 +2131,8 @@ function vocabulary(field = 'tags') {
 
 /** The same, alphabetically: a facet is picked by looking a word up. */
 function vocabularyByName(field) {
-  return vocabulary(field).sort((a, b) =>
-    a.tag.localeCompare(b.tag, undefined, { numeric: true, sensitivity: 'base' }));
+  // A copy to sort: vocabulary()'s own answer is shared, in count order.
+  return memoVocab(`name:${field}`, () => vocabulary(field).slice().sort((a, b) => collate(a.tag, b.tag)));
 }
 
 /**
@@ -1659,6 +2151,8 @@ function matchesFilter(video, f) {
     if (wanted.length && !wanted.includes(rating)) return false;
     if (barred.includes(rating)) return false;
   }
+
+  if (!facesFilterMatch(f.faces, video)) return false;
 
   for (const field of PERSON_FIELDS.concat(['tags', 'models'])) {
     if (!f[field] || !f[field].size) continue;
@@ -1728,6 +2222,21 @@ function renderAdv() {
   for (const [field, host, none] of PERSON_ROWS) {
     renderPersonRow($(host), PERSON_FACETS[field], advDraft[field], none, () => renderAdv());
   }
+  // Only offered once the desktop has profiled something: on a library where
+  // the feature has never run, every video would give the same answer.
+  const facesRow = $('#advFacesRow');
+  if (facesRow) {
+    facesRow.hidden = !state.faces;
+    const host = $('#advFaces');
+    host.innerHTML = '';
+    for (const [value, label] of FACE_CHOICES) {
+      host.appendChild(advChip(label, advDraft.faces.get(value), () => {
+        cycleIn(advDraft.faces, value);
+        renderAdv();
+      }));
+    }
+  }
+
   const ratings = $('#advRating');
   ratings.innerHTML = '';
   for (const value of RATING_VALUES) {
@@ -1809,6 +2318,7 @@ function renderAdv() {
   say('favourites', 'favourite tier', 'favourite tiers');
   say('models', 'model');
   say('ratings', 'rating');
+  say('faces', 'face answer');
   say('tags', 'tag');
   $('#advSummary').textContent = bits.join(' · ') || 'no filters';
 }
@@ -2394,8 +2904,15 @@ function buildSuggestions(video) {
   const { profiled, suggested: ranked } = facesFor(video);
   if (!state.faces || !profiled || !ranked.length) return null;
 
-  const named = new Set((recordFor(video).models || []).map((m) => m.toLowerCase()));
-  const suggested = ranked.filter((s) => !named.has(String(s.name).toLowerCase()));
+  const record = recordFor(video);
+  const named = new Set((record.models || []).map((m) => m.toLowerCase()));
+  // Nor the names turned down for this video, here or on the desktop: "not
+  // her" was the answer, and asking again is what the list exists to stop.
+  const refused = new Set((record.notModels || []).map((m) => String(m).toLowerCase()));
+  const suggested = ranked.filter((s) => {
+    const key = String(s.name).toLowerCase();
+    return !named.has(key) && !refused.has(key);
+  });
   if (!suggested.length) return null;
 
   const row = document.createElement('div');
@@ -2437,6 +2954,36 @@ function buildSuggestions(video) {
       toast(`${one.name} added`, 'ok');
     });
     wrap.appendChild(chip);
+
+    // And the other answer: not her. Written to notModels, the desktop's own
+    // list, so the PC stops offering the name for this video as well.
+    const no = document.createElement('button');
+    no.className = 'face-no';
+    no.textContent = '✕';
+    no.title = `Not ${one.name}`;
+    no.setAttribute('aria-label', `Not ${one.name}`);
+    no.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (!state.libraryLoaded) { editRecord(video, {}); return; } // says why, and retries
+      const before = playerList();
+      editRecord(video, { notModels: [...(recordFor(video).notModels || []), one.name] });
+      const open = playerList().find((v) => v.id === state.playingId);
+      if (open) renderPlayerDetails(open);
+      if (advActive()) { render(); followListing(before); }
+      toast(`${one.name} turned down`, 'ok', {
+        label: 'Undo',
+        run: () => {
+          const lower = String(one.name).toLowerCase();
+          editRecord(video, {
+            notModels: (recordFor(video).notModels || []).filter((n) => String(n).toLowerCase() !== lower),
+          });
+          const still = playerList().find((v) => v.id === state.playingId);
+          if (still) renderPlayerDetails(still);
+          if (advActive()) render();
+        },
+      });
+    });
+    wrap.appendChild(no);
     row.appendChild(wrap);
   }
   return row;
@@ -2463,7 +3010,6 @@ async function openLineup(name) {
   $('#lineupHint').textContent = 'Loading…';
   $('#lineupGrid').innerHTML = '';
   box.hidden = false;
-  pushTrap();
 
   if (!lineups) {
     try {
@@ -2515,12 +3061,16 @@ function buildRecordRow(video, { add = false } = {}) {
   // `add` is only ever set by the player, which is also where race shows.
   row.className = 'record' + (add ? ' in-player' : '');
 
-  row.appendChild(buildStarRow(record.rating || 0, (rating) => {
-    const before = playerList();
-    editRecord(video, { rating });
-    row.replaceWith(buildRecordRow(video, { add }));
-    if (advActive()) { render(); followListing(before); }
-  }));
+  // Pressable only in the player. On a card they say what the rating is;
+  // rating is the player's, or the labels sheet's for a selection.
+  row.appendChild(add
+    ? buildStarRow(record.rating || 0, (rating) => {
+      const before = playerList();
+      editRecord(video, { rating });
+      row.replaceWith(buildRecordRow(video, { add }));
+      if (advActive()) { render(); followListing(before); }
+    })
+    : buildStarDisplay(record.rating || 0));
 
   const chips = buildLabelChips(video, row);
   // Only in the player: there you are looking at one video and naming it is
@@ -2944,8 +3494,54 @@ function beginPlayback() {
   $('#playerBadge').hidden = true;
   el.controls = true;
   el.muted = !soundOn;
-  try { el.currentTime = 0; } catch { /* not seekable yet; it starts at 0 anyway */ }
+  // From where it was left, on this phone or the desktop -- unless that is the
+  // first few seconds, which is the top anyway, or the last ten, which is the
+  // end: a video watched to its credits starts again rather than finishing.
+  const video = playingVideo();
+  const resume = video ? Number(recordFor(video).resume) || 0 : 0;
+  const seekStart = () => {
+    // A late metadata event for a video since swiped past is not this one's.
+    if (video && state.playingId !== video.id) return;
+    const length = Number.isFinite(el.duration) && el.duration > 0
+      ? el.duration : (video && video.duration) || 0;
+    const at = resume > 5 && length && resume < length - 10 ? resume : 0;
+    try { el.currentTime = at; } catch { /* not seekable yet; it starts at 0 anyway */ }
+    if (at) toast(`Resuming at ${fmtTime(at)}`, 'ok');
+  };
+  if (resume > 5 && el.readyState < 1) {
+    el.addEventListener('loadedmetadata', seekStart, { once: true });
+  } else seekStart();
   el.play().catch(() => {});
+}
+
+/** The video the player has open, as a listing entry, or null. */
+function playingVideo() {
+  if (!state.playingId) return null;
+  return state.videos.find((v) => v.id === state.playingId) || null;
+}
+
+/**
+ * Writes where the open video stands into its record's `resume`, the field the
+ * desktop writes too. Only at the moments that end a viewing -- closing the
+ * player, moving to another video, the app going to the background -- never
+ * on a timer: every save uploads the whole library, over mobile data.
+ *
+ * A playthrough only (the preview's seeking is not a position anyone chose),
+ * and only when it moved: past the end-credits it is cleared, so the next
+ * open starts from the top.
+ */
+function notePlaybackPosition() {
+  if (!state.libraryLoaded) return;
+  const el = $('#playerVideo');
+  const video = playingVideo();
+  if (!el || !video || !el.controls || $('#player').hidden) return;
+  const now = Number(el.currentTime) || 0;
+  const length = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : video.duration || 0;
+  if (!length) return;
+  const next = now > 5 && now < length - 10 ? Math.round(now) : 0;
+  const was = Number(recordFor(video).resume) || 0;
+  if (Math.abs(next - was) < 3 && Boolean(next) === Boolean(was)) return;
+  editRecord(video, { resume: next });
 }
 
 /** Everything about the open video, behind the ⓘ — there is no room for it. */
@@ -3016,6 +3612,8 @@ async function openPlayer(video) {
   const modal = $('#player');
   const el = $('#playerVideo');
   if (modal.hidden) playerReturn = pageScrollY(); // only the way in sets the mark
+  // Moving on from another video ends that viewing: where it stood is kept.
+  else if (state.playingId && state.playingId !== video.id) notePlaybackPosition();
   state.playingId = video.id;
   state.playingAnchor = null; // it is in the listing until an edit says otherwise
 
@@ -3066,7 +3664,9 @@ async function openPlayer(video) {
  * leaves to the left.
  */
 function playerList() {
-  return filterByName(state.videos).filter((v) => !v.isFolder);
+  // The listing's own memoised answer: state.videos never holds a folder, so
+  // there is nothing to take out, and a copy per swipe was the whole cost.
+  return filterByName(state.videos);
 }
 
 /**
@@ -3131,6 +3731,7 @@ async function goToVideo(video, step) {
 }
 
 function playSibling(step) {
+  if (playMode.random) { randomStep(step); return; }
   const list = playerList();
   if (list.length < 2 || !state.playingId) return;
   const at = list.findIndex((v) => v.id === state.playingId);
@@ -3138,13 +3739,96 @@ function playSibling(step) {
   goToVideo(list[((at + step) % list.length + list.length) % list.length], step);
 }
 
+/**
+ * Random and Repeat, the desktop's pair, for this time the player is open.
+ * Both start off and closing the player turns them off -- they are a way of
+ * watching, not a setting. `seen` is what Random has played, in order, so
+ * back retraces it rather than rolling the dice again.
+ *
+ * Repeat here is the video itself: at its end it plays again from the top,
+ * ahead of Autoplay. The listing already wraps at both ends on the phone, so
+ * the desktop's "wrap the listing" meaning would have changed nothing.
+ */
+const playMode = { random: false, repeat: false, seen: [], at: -1 };
+
+function resetPlayMode() {
+  playMode.random = false;
+  playMode.repeat = false;
+  playMode.seen = [];
+  playMode.at = -1;
+  syncPlayMode();
+}
+
+function syncPlayMode() {
+  for (const [id, on] of [['#playerRandom', playMode.random], ['#playerRepeat', playMode.repeat]]) {
+    const btn = $(id);
+    if (!btn) continue;
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-pressed', String(on));
+  }
+  if (!$('#player').hidden) syncPlayerNav();
+}
+
+function toggleRandom() {
+  playMode.random = !playMode.random;
+  // Starts from here: what is playing now is the first thing back would reach.
+  playMode.seen = playMode.random && state.playingId ? [state.playingId] : [];
+  playMode.at = playMode.seen.length - 1;
+  syncPlayMode();
+  toast(playMode.random ? 'Random on' : 'Random off', 'ok');
+}
+
+function toggleRepeat() {
+  playMode.repeat = !playMode.repeat;
+  syncPlayMode();
+  toast(playMode.repeat ? 'Repeat on — this video plays again at its end' : 'Repeat off', 'ok');
+}
+
+/**
+ * Random's next: forward through what it already played if you went back,
+ * otherwise a video from the listing it has not played yet. When every one
+ * has played it starts a fresh round -- the listing wraps on the phone, so
+ * Random does too. Ids rather than entries: a refresh replaces the objects.
+ */
+function randomStep(step) {
+  const list = playerList();
+  const byId = new Map(list.map((v) => [v.id, v]));
+  if (step < 0) {
+    while (playMode.at > 0) {
+      playMode.at -= 1;
+      const back = byId.get(playMode.seen[playMode.at]);
+      if (back) { goToVideo(back, -1); return; }
+    }
+    return;
+  }
+  while (playMode.at + 1 < playMode.seen.length) {
+    playMode.at += 1;
+    const again = byId.get(playMode.seen[playMode.at]);
+    if (again) { goToVideo(again, 1); return; }
+  }
+  const played = new Set(playMode.seen);
+  let pool = list.filter((v) => !played.has(v.id) && v.id !== state.playingId);
+  if (!pool.length) {
+    playMode.seen = state.playingId ? [state.playingId] : [];
+    playMode.at = playMode.seen.length - 1;
+    pool = list.filter((v) => v.id !== state.playingId);
+    if (!pool.length) return;
+    toast('Every video here has played — starting a new round', 'ok');
+  }
+  const pick = pool[Math.floor(Math.random() * pool.length)];
+  playMode.seen.push(pick.id);
+  playMode.at = playMode.seen.length - 1;
+  goToVideo(pick, 1);
+}
+
 /** Hides the arrows when there is nowhere to go, and says where you are. */
 function syncPlayerNav() {
   const list = playerList();
   const at = list.findIndex((v) => v.id === state.playingId);
   const usable = list.length > 1 && at >= 0;
-  $('#playerPrev').hidden = !usable;
-  $('#playerNext').hidden = !usable;
+  // Random goes back only as far as it has been; forward, anywhere.
+  $('#playerPrev').hidden = playMode.random ? playMode.at <= 0 : !usable;
+  $('#playerNext').hidden = playMode.random ? list.length < 2 : !usable;
   const pos = $('#playerPos');
   pos.hidden = at < 0;
   pos.textContent = at < 0 ? '' : `${at + 1} / ${list.length}`;
@@ -3166,10 +3850,6 @@ function attachPullToRefresh() {
   const hint = $('#pullHint');
   let from = null;
   let armed = false;
-
-  const overlayOpen = () => !$('#player').hidden || !$('#adv').hidden
-    || !$('#labels').hidden || !$('#picker').hidden
-    || !$('#lineup').hidden;
 
   document.addEventListener('touchstart', (ev) => {
     from = null;
@@ -3298,7 +3978,27 @@ function syncAutoButton() {
   btn.title = autoNext ? 'Autoplay is on — videos follow each other' : 'Autoplay the next video';
 }
 
+/**
+ * The details panel, folded away in a phone held sideways: there the screen is
+ * about 400px tall, and the panel's share of that was most of the picture. The
+ * ⓘ in the bar brings it back over the side of the video; upright, the button
+ * is not shown and the panel is always there, as it always was.
+ */
+function setInfoOpen(open) {
+  const modal = $('#player');
+  if (!modal) return;
+  modal.classList.toggle('info-open', open);
+  const btn = $('#playerInfoBtn');
+  if (btn) {
+    btn.classList.toggle('on', open);
+    btn.setAttribute('aria-pressed', String(open));
+  }
+}
+
 function closePlayer() {
+  notePlaybackPosition(); // before the src goes, while currentTime still means something
+  resetPlayMode();
+  setInfoOpen(false);
   stopPreview(); // a timer left running would seek a src that has gone
   const el = $('#playerVideo');
   el.pause();
@@ -3317,6 +4017,52 @@ function closePlayer() {
 }
 
 // --------------------------------------------------------------------- init
+
+/**
+ * Back to the sign-in screen, with whatever was open closed first: a player
+ * left running under the gate would go on streaming with a dead session.
+ */
+function showGate() {
+  for (const { sel, close } of OVERLAYS) {
+    if (!$(sel).hidden) {
+      try { close(); } catch { /* closing is best effort here */ }
+    }
+  }
+  if (state.selecting) exitSelection();
+  state.load = null; // any listing still streaming belongs to the old session
+  state.libraryLoaded = false;
+  $('#gate').hidden = false;
+  $('#main').hidden = true;
+  toast('Signed out — sign in to carry on', 'err');
+}
+
+/** The sort keys sortVideos understands, as the select offers them. */
+const SORT_KEY = 'video-explorer.sort';
+const SORTS = ['rating', 'name', 'mtime', 'size', 'duration', 'models', 'tags', 'folder'];
+
+function restoreSort() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SORT_KEY) || 'null');
+    if (saved && SORTS.includes(saved.sort)) state.sort = saved.sort;
+    if (saved && (saved.dir === 'asc' || saved.dir === 'desc')) state.sortDir = saved.dir;
+  } catch { /* first run, or storage blocked: the default sort */ }
+}
+
+function saveSort() {
+  try {
+    localStorage.setItem(SORT_KEY, JSON.stringify({ sort: state.sort, dir: state.sortDir }));
+  } catch { /* remembered for this run only */ }
+}
+
+function syncSortControls() {
+  const sel = $('#sortSel');
+  if (sel) sel.value = state.sort;
+  const dir = $('#sortDir');
+  if (dir) {
+    dir.textContent = state.sortDir === 'asc' ? '↑' : '↓';
+    dir.title = state.sortDir === 'asc' ? 'Ascending — tap to reverse' : 'Descending — tap to reverse';
+  }
+}
 
 async function boot() {
   $('#signIn').addEventListener('click', () => auth.signIn().catch((e) => toast(e.message, 'err')));
@@ -3340,7 +4086,17 @@ async function boot() {
     toast(autoNext ? 'Autoplay on' : 'Autoplay off', 'ok');
   });
   syncAutoButton();
+  $('#playerRandom').addEventListener('click', toggleRandom);
+  $('#playerRepeat').addEventListener('click', toggleRepeat);
+  $('#playerInfoBtn').addEventListener('click', () => setInfoOpen(!$('#player').classList.contains('info-open')));
   $('#playerVideo').addEventListener('ended', () => {
+    const el = $('#playerVideo');
+    // Repeat outranks Autoplay: it means "stay on this one".
+    if (playMode.repeat) {
+      try { el.currentTime = 0; } catch { /* not seekable */ }
+      el.play().catch(() => {});
+      return;
+    }
     if (autoNext) playSibling(1);
   });
   attachPlayerSwipe();
@@ -3435,9 +4191,49 @@ async function boot() {
     for (const card of document.querySelectorAll('.card')) card.classList.add('picked');
     updateSelectionBar();
   });
+  // A beat after the last key rather than on every one: each render filters
+  // and sorts the whole listing, and a name typed at speed was a dozen of them.
+  let searchTimer = null;
   $('#search').addEventListener('input', (ev) => {
-    state.query = ev.target.value.trim().toLowerCase();
+    clearTimeout(searchTimer);
+    const value = ev.target.value;
+    searchTimer = setTimeout(() => {
+      state.query = value.trim().toLowerCase();
+      render();
+    }, 150);
+  });
+
+  // The sort, chosen here and remembered per device. The keys are the ones
+  // sortVideos has always understood; until now only the default was reachable.
+  restoreSort();
+  syncSortControls();
+  $('#sortSel').addEventListener('change', (ev) => {
+    state.sort = ev.target.value;
+    saveSort();
+    gridKey = '';
     render();
+  });
+  $('#sortDir').addEventListener('click', () => {
+    state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
+    saveSort();
+    syncSortControls();
+    gridKey = '';
+    render();
+  });
+
+  // Signing out, by choice or because the session died under a refresh: the
+  // sign-in screen, rather than a grid whose every tap fails.
+  auth.onSignOut(showGate);
+  $('#signOut').addEventListener('click', async () => {
+    if (!window.confirm('Sign out of OneDrive on this device?')) return;
+    // Anything unsaved goes up first; a sign-out is not a reason to lose it.
+    if (state.dirty && state.libraryLoaded) {
+      clearTimeout(saveTimer);
+      await saveAndAdopt().catch(() => {});
+    }
+    // The labels and listings this phone kept are the account's; they go too.
+    await graph.kvClear();
+    auth.signOut();
   });
 
   try {
@@ -3454,16 +4250,22 @@ async function boot() {
 
   $('#gate').hidden = true;
   $('#main').hidden = false;
-  pushTrap(); // gives the Android back button something to pop
+  // No trap yet: at the root with nothing open, Back is free to leave. One is
+  // armed by the first folder, overlay or selection that gives it a job.
 
   try {
     state.account = await graph.me();
   } catch (err) {
-    toast(err.message, 'err');
-    $('#gate').hidden = false;
-    $('#main').hidden = true;
-    return;
+    // Offline is not signed out: the saved labels and listings still show.
+    if (!graph.isOffline(err)) {
+      toast(err.message, 'err');
+      $('#gate').hidden = false;
+      $('#main').hidden = true;
+      return;
+    }
   }
+  const who = $('#whoami');
+  if (who && state.account) who.textContent = state.account.email || state.account.name || '';
 
   loadSettings();
   await readLibrary();
@@ -3500,6 +4302,9 @@ if (location.hash === '#debug') {
     openPlayer, beginPlayback, startPreview, stopPreview, followListing,
 
     get soundOn() { return soundOn; }, setSoundOn, playerList,
+    setFavouriteModel, favouriteTier, openTierMenu, notePlaybackPosition, playMode,
+    toggleRandom, toggleRepeat, randomStep, facesFilterMatch, showGate, useSavedListing,
+    get libVersion() { return libVersion; },
   };
 }
 

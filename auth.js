@@ -68,9 +68,23 @@ export function signedIn() {
   return Boolean(load());
 }
 
+// Told when the session ends, by a button or by a refresh token that died
+// mid-session -- the second is the one that matters: without it the app goes
+// on showing a grid whose every tap fails with "not signed in".
+const signOutListeners = [];
+
+export function onSignOut(fn) {
+  signOutListeners.push(fn);
+}
+
 export function signOut() {
+  const was = Boolean(load());
   tokens = null;
-  localStorage.removeItem(STORE_KEY);
+  try { localStorage.removeItem(STORE_KEY); } catch { /* storage blocked: memory is cleared */ }
+  if (!was) return;
+  for (const fn of signOutListeners) {
+    try { fn(); } catch { /* one listener must not stop the others */ }
+  }
 }
 
 /** Sends the browser to Microsoft. Returns only in the sense that it never does. */
@@ -173,6 +187,25 @@ export async function accessToken() {
   const current = load();
   if (!current) throw new Error('not signed in');
   if (Date.now() < current.expires_at) return current.access_token;
+  if (!refreshing) {
+    refreshing = refresh().finally(() => { refreshing = null; });
+  }
+  return refreshing;
+}
+
+/**
+ * A fresh token now, whatever the clock says -- for a 401 on a token that has
+ * not reached its expiry. Tokens get revoked early (a password change, a
+ * policy), and the stored expiry cannot know.
+ *
+ * `stale` is the token that was refused. When it is no longer the one held,
+ * some other request already refreshed it, and six requests refused at once
+ * cost one refresh rather than six.
+ */
+export async function refreshNow(stale) {
+  const current = load();
+  if (!current) throw new Error('not signed in');
+  if (stale && current.access_token !== stale) return current.access_token;
   if (!refreshing) {
     refreshing = refresh().finally(() => { refreshing = null; });
   }

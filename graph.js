@@ -9,19 +9,83 @@
  * shared folder" path bugs the desktop version had to work around.
  */
 
-import { accessToken } from './auth.js';
+import { accessToken, refreshNow } from './auth.js';
 
 const BASE = 'https://graph.microsoft.com/v1.0';
 
 const VIDEO_EXT = /\.(mp4|m4v|mov)$/i;
 
+/**
+ * Throttling, answered rather than reported.
+ *
+ * Graph says "not now" with a 429, or a 503/504 when a node is busy, and both
+ * mean the same request will succeed shortly. Every call used to treat them
+ * as failures: a thumbnail batch went blank, a listing stopped part-way, a
+ * star press failed to save. So every request goes through here, and a
+ * throttled one waits -- as long as Retry-After asks, capped, or 1s, 2s, 4s --
+ * and goes again, four tries in all.
+ *
+ * And a 401 on a token the clock says is still good means it was revoked
+ * early; one forced refresh and one more try, rather than an error that
+ * would repeat until the stored expiry came round.
+ */
+const RETRY_STATUS = new Set([429, 503, 504]);
+const TRIES = 4;
+const RETRY_CAP_MS = 30000;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** How long to wait before try `attempt + 1`, from a Retry-After value if there is one. */
+function retryWait(after, attempt) {
+  if (after !== null && after !== undefined && String(after).trim() !== '') {
+    const seconds = Number(after);
+    if (Number.isFinite(seconds)) return Math.min(Math.max(0, seconds) * 1000, RETRY_CAP_MS);
+    // The other form the header may take: an HTTP date.
+    const at = Date.parse(after);
+    if (Number.isFinite(at)) return Math.min(Math.max(0, at - Date.now()), RETRY_CAP_MS);
+  }
+  return Math.min(1000 * 2 ** attempt, RETRY_CAP_MS);
+}
+
+/**
+ * fetch(), with the bearer token, the throttling waits and the one 401 retry.
+ * A network failure is left to throw its TypeError: that is how the callers
+ * tell "offline" from "Graph said no".
+ */
+export async function graphFetch(url, init = {}) {
+  let refreshed = false;
+  for (let attempt = 0; ; attempt += 1) {
+    const token = await accessToken();
+    const res = await fetch(url, {
+      ...init,
+      headers: { Authorization: `Bearer ${token}`, ...(init.headers || {}) },
+    });
+    if (res.status === 401 && !refreshed) {
+      refreshed = true;
+      // Throws, and signs out, when the refresh token is dead too -- which is
+      // the right answer then: nothing more this request can do.
+      await refreshNow(token);
+      attempt -= 1; // a refused token is not a throttle; it does not use up a try
+      continue;
+    }
+    if (RETRY_STATUS.has(res.status) && attempt < TRIES - 1) {
+      await sleep(retryWait(res.headers.get('Retry-After'), attempt));
+      continue;
+    }
+    return res;
+  }
+}
+
+/** True when an error is the network being gone, rather than an answer. */
+export function isOffline(err) {
+  return err instanceof TypeError || Boolean(err && err.offline);
+}
+
 async function call(pathOrUrl, options = {}) {
-  const token = await accessToken();
   const url = pathOrUrl.startsWith('http') ? pathOrUrl : BASE + pathOrUrl;
-  const res = await fetch(url, {
+  const res = await graphFetch(url, {
     ...options,
     headers: {
-      Authorization: `Bearer ${token}`,
       ...(options.body ? { 'Content-Type': 'application/json' } : {}),
       ...options.headers,
     },
@@ -95,12 +159,9 @@ function normalise(item) {
 // flattened library folder of five thousand was twenty-five round trips where
 // it could have been six, and the whole library a thousand where it could be
 // two hundred -- each one a phone waiting on the network for nothing.
-let PAGE = 999;
-
-/** How many items a listing call asks for. Clamped to what Graph will serve. */
-export function setPageSize(size) {
-  PAGE = Math.max(20, Math.min(999, Number(size) || 200));
-}
+// Fixed: a per-device setting used to override it back down to 200, with no
+// screen left to change it from.
+const PAGE = 999;
 
 function childrenUrl(driveId, itemId, query) {
   return driveId && itemId
@@ -197,33 +258,75 @@ export async function listChildren(driveId, itemId, next = null) {
  */
 export const BATCH = 20;
 
-export async function listChildrenBatch(spots) {
-  const token = await accessToken();
-  const slice = spots.slice(0, BATCH);
-  const res = await fetch(`${BASE}/$batch`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      requests: slice.map((spot, index) => ({
-        id: String(index),
-        method: 'GET',
-        url: spot.next
-          ? (spot.next.startsWith(BASE) ? spot.next.slice(BASE.length) : spot.next)
-          : childrenUrl(spot.driveId, spot.itemId, `?$select=${SELECT}&$top=${PAGE}`),
-      })),
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    const err = new Error((body.error && body.error.message) || `Graph ${res.status}`);
-    err.status = res.status;
-    throw err;
+/** A header out of a $batch answer, whose names arrive in whatever case. */
+function headerOf(headers, name) {
+  if (!headers) return null;
+  const want = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === want) return value;
   }
+  return null;
+}
 
-  const body = await res.json();
+/**
+ * One $batch, answered in full: Map of request id -> its response.
+ *
+ * Graph throttles inside a batch as well as outside it -- the POST succeeds and
+ * some of the twenty come back 429 on their own. Those were simply dropped, a
+ * blank tile or a folder the walk never read. Now they go round again, by
+ * themselves, after the longest Retry-After any of them gave, up to the same
+ * four tries as everything else. What is still throttled after that is
+ * returned as it stands, for the caller to count.
+ */
+async function batchCall(requests) {
+  const answers = new Map();
+  let pending = requests;
+  for (let attempt = 0; pending.length; attempt += 1) {
+    const res = await graphFetch(`${BASE}/$batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requests: pending }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      const err = new Error((body.error && body.error.message) || `Graph ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+    const body = await res.json();
+    const byId = new Map(pending.map((r) => [r.id, r]));
+    const again = [];
+    let wait = 0;
+    for (const response of body.responses || []) {
+      const id = String(response.id);
+      const asked = byId.get(id);
+      if (!asked) continue;
+      if (RETRY_STATUS.has(response.status) && attempt < TRIES - 1) {
+        again.push(asked);
+        wait = Math.max(wait, retryWait(headerOf(response.headers, 'Retry-After'), attempt));
+        continue;
+      }
+      answers.set(id, response);
+    }
+    pending = again;
+    if (pending.length) await sleep(wait);
+  }
+  return answers;
+}
+
+export async function listChildrenBatch(spots) {
+  const slice = spots.slice(0, BATCH);
+  const answers = await batchCall(slice.map((spot, index) => ({
+    id: String(index),
+    method: 'GET',
+    url: spot.next
+      ? (spot.next.startsWith(BASE) ? spot.next.slice(BASE.length) : spot.next)
+      : childrenUrl(spot.driveId, spot.itemId, `?$select=${SELECT}&$top=${PAGE}`),
+  })));
+
   const out = slice.map(() => ({ failed: 'no answer' }));
-  for (const response of body.responses || []) {
-    const at = Number(response.id);
+  for (const [id, response] of answers) {
+    const at = Number(id);
     if (!Number.isInteger(at) || !slice[at]) continue;
     const page = response.body || {};
     if (response.status !== 200) {
@@ -253,29 +356,26 @@ export async function listChildrenBatch(spots) {
  */
 export async function thumbnailsFor(items) {
   if (!items.length) return new Map();
-  const token = await accessToken();
   const slice = items.slice(0, 20);
 
-  const res = await fetch(`${BASE}/$batch`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      requests: slice.map((item, index) => ({
-        id: String(index),
-        method: 'GET',
-        url: `/drives/${item.driveId}/items/${item.id}/thumbnails?$select=large,medium`,
-      })),
-    }),
-  });
-  if (!res.ok) return new Map();
+  let answers;
+  try {
+    answers = await batchCall(slice.map((item, index) => ({
+      id: String(index),
+      method: 'GET',
+      url: `/drives/${item.driveId}/items/${item.id}/thumbnails?$select=large,medium`,
+    })));
+  } catch (err) {
+    if (isOffline(err)) throw err;
+    return new Map(); // refused outright: blank tiles, as before
+  }
 
-  const body = await res.json();
   const found = new Map();
-  for (const response of body.responses || []) {
+  for (const [id, response] of answers) {
     if (response.status !== 200) continue;
     const set = ((response.body || {}).value || [])[0];
     const pick = set && (set.large || set.medium);
-    if (pick) found.set(slice[Number(response.id)].id, pick.url);
+    if (pick && slice[Number(id)]) found.set(slice[Number(id)].id, pick.url);
   }
   return found;
 }
@@ -405,6 +505,25 @@ export async function kvDel(key) {
   try { db.transaction(KV, 'readwrite').objectStore(KV).delete(key); } catch { /* gone is gone */ }
 }
 
+/**
+ * Everything kept, gone -- for signing out, when the next person to pick the
+ * phone up should not find the labels and listings still in it.
+ */
+export async function kvClear() {
+  const db = await idb();
+  if (!db) return;
+  await new Promise((resolve) => {
+    try {
+      const tx = db.transaction(KV, 'readwrite');
+      tx.objectStore(KV).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
 // ------------------------------------------------------------ ratings + tags
 
 const LIBRARY_PATH = '/me/drive/root:/.video-explorer/library.json';
@@ -487,10 +606,7 @@ let libHeld = { eTag: '', base: null };
 const copyOf = (obj) => JSON.parse(JSON.stringify(obj));
 
 async function downloadLibrary() {
-  const token = await accessToken();
-  const res = await fetch(`${BASE}${LIBRARY_PATH}:/content`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await graphFetch(`${BASE}${LIBRARY_PATH}:/content`);
   if (res.status === 404) return { version: 1, records: {} };
   if (!res.ok) throw new Error(`Could not read your labels (${res.status})`);
   const body = await res.json();
@@ -498,6 +614,22 @@ async function downloadLibrary() {
     throw new Error('The labels file on OneDrive is not in a shape this understands');
   }
   return body;
+}
+
+/**
+ * No signal at all is not the same as a refusal. The copy IndexedDB holds is
+ * the file as this phone last saw it, which is a far better thing to show than
+ * a grid with no ratings on it -- so it is handed back, on the error, for the
+ * caller to show read-only: an offline copy must never be written over the
+ * real file, which may have moved on since.
+ */
+async function offlineCopy(err) {
+  if (!isOffline(err)) return err;
+  const kept = await kvGet('library');
+  const out = new Error('Offline');
+  out.offline = true;
+  if (kept && kept.body && kept.body.records) out.library = kept.body;
+  return out;
 }
 
 export async function loadLibrary() {
@@ -509,6 +641,7 @@ export async function loadLibrary() {
       kvDel('library');
       return { version: 1, records: {} };
     }
+    if (isOffline(err)) throw await offlineCopy(err);
     throw new Error(`Could not read your labels (${err.status || err.message})`);
   }
   const tag = meta.cTag || '';
@@ -519,7 +652,12 @@ export async function loadLibrary() {
     return kept.body;
   }
 
-  const body = await downloadLibrary();
+  let body;
+  try {
+    body = await downloadLibrary();
+  } catch (err) {
+    throw await offlineCopy(err);
+  }
   libHeld = { eTag: meta.eTag || '', base: copyOf(body) };
   if (tag) await kvSet('library', { tag, body });
   return body;
@@ -558,12 +696,13 @@ export async function saveLibrary(library) {
     // record at a time. Nothing legitimate on this phone produces it, so refusing
     // costs nothing and the one time it fires it saves the library.
     if (loadedCount && !count) {
-      throw new Error('Refusing to save an empty library over your labels');
+      const err = new Error('Refusing to save an empty library over your labels');
+      err.permanent = true; // trying again would refuse again
+      throw err;
     }
-    const token = await accessToken();
-    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const headers = { 'Content-Type': 'application/json' };
     if (libHeld.eTag) headers['If-Match'] = libHeld.eTag;
-    const res = await fetch(`${BASE}${LIBRARY_PATH}:/content`, {
+    const res = await graphFetch(`${BASE}${LIBRARY_PATH}:/content`, {
       method: 'PUT',
       headers,
       // Compact, matching what the desktop writes: the indentation was a fifth of
@@ -611,6 +750,30 @@ const VE_PATH = '/me/drive/root:/.video-explorer';
 const HELD = 120;
 const held = new Map();
 
+/**
+ * Six of these in the air at once, at most. A lineup is forty-odd crops and
+ * a row of suggestions a dozen, each its own request, and firing them all
+ * together is how the account gets throttled -- which then slows the listing
+ * and the thumbnails as well. A slot is handed straight to the next waiter
+ * rather than freed and re-taken, so a newcomer cannot slip in between and
+ * make it seven.
+ */
+const ASSET_SLOTS = 6;
+let assetBusy = 0;
+const assetQueue = [];
+
+async function withAssetSlot(run) {
+  if (assetBusy >= ASSET_SLOTS) await new Promise((resolve) => assetQueue.push(resolve));
+  else assetBusy += 1;
+  try {
+    return await run();
+  } finally {
+    const next = assetQueue.shift();
+    if (next) next();
+    else assetBusy -= 1;
+  }
+}
+
 export async function asset(rel) {
   if (held.has(rel)) {
     const hit = held.get(rel);
@@ -623,12 +786,20 @@ export async function asset(rel) {
 
   let url = null;
   try {
-    const token = await accessToken();
-    const res = await fetch(`${BASE}${VE_PATH}/${rel}:/content`, {
-      headers: { Authorization: `Bearer ${token}` },
+    url = await withAssetSlot(async () => {
+      const res = await graphFetch(`${BASE}${VE_PATH}/${rel}:/content`);
+      return res.ok ? URL.createObjectURL(await res.blob()) : null;
     });
-    if (res.ok) url = URL.createObjectURL(await res.blob());
-  } catch { /* offline: the caller falls back to streaming */ }
+  } catch {
+    // Offline: the caller falls back to streaming. Not remembered as absent,
+    // since it may well be there once the signal is back.
+    return null;
+  }
+  // Another call for the same file may have landed while this one waited.
+  if (held.has(rel)) {
+    if (url) URL.revokeObjectURL(url);
+    return held.get(rel);
+  }
 
   held.set(rel, url);
   if (held.size > HELD) {
@@ -642,10 +813,7 @@ export async function asset(rel) {
 
 /** A small JSON file out of the same folder, or null when it is not there. */
 export async function veJson(rel) {
-  const token = await accessToken();
-  const res = await fetch(`${BASE}${VE_PATH}/${rel}:/content`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await graphFetch(`${BASE}${VE_PATH}/${rel}:/content`);
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`Could not read ${rel} (${res.status})`);
   return res.json();
@@ -666,10 +834,7 @@ const FACES_PATH = '/me/drive/root:/.video-explorer/faces/suggestions.json';
  * whether that is worth a message.
  */
 export async function loadSuggestions() {
-  const token = await accessToken();
-  const res = await fetch(`${BASE}${FACES_PATH}:/content`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await graphFetch(`${BASE}${FACES_PATH}:/content`);
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`Could not read the face suggestions (${res.status})`);
   const body = await res.json();
@@ -704,10 +869,9 @@ export async function dailyBackup(library) {
   if (names.some((name) => name.startsWith(`library-${today}`))) return false;
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const token = await accessToken();
-  const res = await fetch(`${BASE}${BACKUPS_PATH}/library-${stamp}.json:/content`, {
+  const res = await graphFetch(`${BASE}${BACKUPS_PATH}/library-${stamp}.json:/content`, {
     method: 'PUT',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(library, null, 1),
   });
   return res.ok;
@@ -745,34 +909,28 @@ export async function findVideos(wanted) {
   }
   if (!todo.length) return answers;
 
-  const token = await accessToken();
   for (let at = 0; at < todo.length; at += 20) {
     const slice = todo.slice(at, at + 20);
-    let body;
+    let replies;
     try {
-      const res = await fetch(`${BASE}/$batch`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          requests: slice.map((item, index) => ({
-            id: String(index),
-            method: 'GET',
-            // Doubled apostrophes: an OData string literal escapes them that
-            // way, and plenty of these names have one in them.
-            url: `/me/drive/root/search(q='${encodeURIComponent(item.name.replace(/'/g, "''"))}')`
-              + `?$select=${SELECT}&$top=12`,
-          })),
-        }),
-      });
-      if (!res.ok) return answers;
-      body = await res.json();
+      replies = await batchCall(slice.map((item, index) => ({
+        id: String(index),
+        method: 'GET',
+        // Doubled apostrophes: an OData string literal escapes them that
+        // way, and plenty of these names have one in them.
+        url: `/me/drive/root/search(q='${encodeURIComponent(item.name.replace(/'/g, "''"))}')`
+          + `?$select=${SELECT}&$top=12`,
+      })));
     } catch {
       return answers; // no stills is a lesser failure than no list
     }
 
-    for (const response of body.responses || []) {
-      const asked = slice[Number(response.id)];
+    for (const [id, response] of replies) {
+      const asked = slice[Number(id)];
       if (!asked) continue;
+      // Still throttled after every retry is not "not found", and must not be
+      // remembered as it for the session.
+      if (RETRY_STATUS.has(response.status)) continue;
       const hits = response.status === 200 ? ((response.body || {}).value || []) : [];
       const match = hits.map(normalise).find((candidate) => candidate.size === asked.size
         && Math.round(candidate.mtime) === Math.round(asked.mtime));

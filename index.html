@@ -4,6 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0e1116">
+<!-- Scripts and styles from this origin only: no inline script, no eval, no
+     third-party code. That is the part that matters, and it is exact.
+     connect/img/media are https: rather than a host list on purpose. Graph
+     answers content requests with redirects to signed URLs on whichever
+     storage host holds the file (*.sharepoint.com, *.1drv.com,
+     *.livefilestore.com, *.svc.ms for thumbnails, and more by region), and a
+     host missed from a list is a video that silently will not play. blob: is
+     the strips and face crops, fetched with a token and handed over as object
+     URLs. No inline styles either: everything the script styles goes through
+     element.style, which CSP leaves alone. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' https://graph.microsoft.com https://login.microsoftonline.com https:; img-src 'self' blob: data: https:; media-src 'self' blob: https:; manifest-src 'self'; worker-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
 <title>Video Explorer</title>
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="icon" href="./icon.svg">
@@ -24,6 +35,17 @@
     <div id="crumb" class="crumb-bar"></div>
     <div class="tools">
       <input id="search" type="search" class="search" placeholder="name or #tag" autocomplete="off">
+      <select id="sortSel" class="btn sort-sel" aria-label="Sort by" title="Sort by">
+        <option value="rating">Rating</option>
+        <option value="name">Name</option>
+        <option value="mtime">Date</option>
+        <option value="size">Size</option>
+        <option value="duration">Length</option>
+        <option value="models">Models</option>
+        <option value="tags">Tags</option>
+        <option value="folder">Folder</option>
+      </select>
+      <button id="sortDir" class="btn icon" title="Reverse the sort" aria-label="Reverse the sort">↓</button>
       <button id="flatBtn" class="btn icon" title="Flatten subfolders — every video below here">⇊</button>
       <button id="advBtn" class="btn icon" title="Advanced filters">
         <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
@@ -54,6 +76,11 @@
     <div id="videosTail" class="videos-tail" hidden></div>
     <button id="loadMore" class="btn more" hidden>Load more</button>
   </section>
+
+  <footer class="app-foot">
+    <span id="whoami" class="dim"></span>
+    <button id="signOut" class="btn ghost">Sign out</button>
+  </footer>
 
   <div id="selectionBar" class="selection-bar" hidden>
     <span id="selCount" class="sel-count">0 selected</span>
@@ -100,6 +127,11 @@
 
       <div class="adv-label">Rating</div>
       <div id="advRating" class="chip-row"></div>
+
+      <div id="advFacesRow" hidden>
+        <div class="adv-label">Faces <span class="dim">from the desktop's face recognition</span></div>
+        <div id="advFaces" class="chip-row"></div>
+      </div>
 
       <div class="adv-label">Tags <button id="advTagMode" class="mode">all</button></div>
       <div id="advTags" class="chip-row"></div>
@@ -178,6 +210,9 @@
   <div class="player-bar">
     <span id="playerName" class="player-name"></span>
     <span id="playerPos" class="player-pos"></span>
+    <button id="playerInfoBtn" class="btn ghost player-info-btn" title="Details" aria-label="Details" aria-pressed="false">ⓘ</button>
+    <button id="playerRandom" class="btn ghost" title="Random — the next video is any one in this listing" aria-pressed="false">🔀</button>
+    <button id="playerRepeat" class="btn ghost" title="Repeat — play this video again at its end" aria-pressed="false">🔁</button>
     <button id="playerAuto" class="btn ghost" title="Autoplay the next video">⏭</button>
     <button id="playerSound" class="btn ghost" title="Sound">🔇</button>
     <button id="playerClose" class="btn ghost">✕</button>

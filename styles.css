@@ -40,6 +40,10 @@ html, body {
            env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
 
+/* The app has its own pull-to-refresh; Chrome's would fire alongside it and
+   reload the whole page under the one the app was already doing. */
+html { overscroll-behavior-y: none; }
+
 /* Held where it was while an overlay is over it -- see syncPagePin. The offset
    is an inline `top`, so the listing does not jump to its top and back. */
 body.pinned {
@@ -706,6 +710,7 @@ body.selecting .tick { opacity: 1; }
 .picker-card {
   width: 100%;
   max-height: 82vh;
+  max-height: 82dvh; /* the height on screen now, as .picker itself is sized */
   display: flex;
   flex-direction: column;
   background: var(--bg-elev);
@@ -896,3 +901,110 @@ body.selecting .tick { opacity: 1; }
 
 /* Hidden when there is nothing to offer, e.g. the models list until you type. */
 .chip-row[hidden] { display: none; }
+
+/* ------------------------------------------------------------ touch targets */
+
+/* A thumb is about 36px across, and these were 20-odd: a chip, an all/any
+   switch, a crumb and a favourite's heart were all easy to miss and easier to
+   hit the neighbour of. The look stays; the box grows to the floor. */
+.chip, .mode, .crumb, .group-fav {
+  min-height: 36px;
+  box-sizing: border-box;
+}
+.chip, .mode { padding-top: 6px; padding-bottom: 6px; }
+.group-fav { min-width: 36px; padding: 6px 8px; position: relative; }
+/* Its tier, small, beside the heart -- the number the desktop gives it. */
+.group-tier { font-size: 10px; margin-left: 1px; vertical-align: super; color: inherit; }
+
+/* Stars that say a rating rather than take one: cards and the selection bar. */
+.stars.read-only .star { cursor: default; }
+button.stars.read-only {
+  border: 0;
+  background: none;
+  padding: 6px 2px;
+  min-height: 36px;
+  cursor: pointer;
+}
+button.stars.read-only .star { cursor: inherit; }
+
+/* Not her: the face suggestion's other answer, beside the chip that credits. */
+.face-no {
+  min-width: 32px;
+  min-height: 36px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-elev-2);
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 8px;
+}
+.face-no:active { color: #e8a0a0; border-color: #6b3535; }
+
+/* The favourite tier menu a hold on a heart opens. */
+.tier-menu {
+  position: fixed;
+  z-index: 110;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: calc(100vw - 16px);
+  padding: 8px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .5);
+}
+
+/* --------------------------------------------------------------- sorting */
+
+/* As narrow as its longest word: the search box keeps the rest of the row. */
+.sort-sel {
+  flex: none;
+  max-width: 96px;
+  padding: 8px 6px;
+  background: var(--bg-elev-2);
+  appearance: auto;
+}
+
+/* ------------------------------------------------------------ the account */
+
+.app-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 28px;
+  font-size: 12px;
+}
+.app-foot .dim { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* -------------------------------------------------------- player extras */
+
+#playerRandom.on, #playerRepeat.on, #playerInfoBtn.on { color: var(--accent); }
+/* Upright the details are always shown, so there is nothing to toggle. */
+.player-info-btn { display: none; }
+
+/* A phone on its side is about 400px tall, and the details panel's share of
+   that left the video a letterbox. The panel folds away behind the ⓘ and,
+   brought back, floats over the right of the picture instead of under it. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .player-bar { padding-top: calc(4px + env(safe-area-inset-top)); padding-bottom: 4px; }
+  .player-info-btn { display: inline-flex; }
+  .player-stage { min-height: 0; }
+  .player-info { display: none; }
+  .player.info-open .player-info {
+    display: block;
+    position: absolute;
+    top: calc(44px + env(safe-area-inset-top)); /* under the bar */
+    right: 0;
+    bottom: 0;
+    width: min(46vw, 420px);
+    max-height: none;
+    z-index: 96;
+    border-top: 0;
+    border-left: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg-elev) 94%, transparent);
+    padding-right: calc(12px + env(safe-area-inset-right));
+  }
+}
