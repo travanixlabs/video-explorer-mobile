@@ -556,49 +556,9 @@ const LIBRARY_PATH = '/me/drive/root:/.video-explorer/library.json';
  * wins; both changed, the later `updated` wins, ours on a tie, and an edit
  * always beats a deletion. Favourites merge by name.
  */
-export function mergeLibraries(base, ours, theirs) {
-  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-  const pick = (b, o, t, both) => {
-    const oc = !same(o, b);
-    const tc = !same(t, b);
-    if (oc && !tc) return o;
-    if (tc && !oc) return t;
-    if (!oc) return o;
-    if (o === undefined) return t;
-    if (t === undefined) return o;
-    return both(o, t);
-  };
-  const newer = (o, t) => ((Number(t.updated) || 0) > (Number(o.updated) || 0) ? t : o);
-  const mine = (o) => o;
-  const mergeMap = (bm, om, tm, both) => {
-    bm = bm || {}; om = om || {}; tm = tm || {};
-    const out = {};
-    for (const k of new Set([...Object.keys(bm), ...Object.keys(om), ...Object.keys(tm)])) {
-      const v = pick(bm[k], om[k], tm[k], both);
-      if (v !== undefined) out[k] = v;
-    }
-    return out;
-  };
-  const names = (list) => new Map((Array.isArray(list) ? list : []).map((n) => [String(n).toLowerCase(), n]));
-  const bf = names(base.favourites);
-  const of = names(ours.favourites);
-  const tf = names(theirs.favourites);
-  const favourites = [];
-  for (const k of new Set([...bf.keys(), ...of.keys(), ...tf.keys()])) {
-    const keep = of.has(k) !== bf.has(k) ? of.has(k) : tf.has(k);
-    if (keep) favourites.push(of.get(k) || tf.get(k));
-  }
-  favourites.sort((a, b) => String(a).localeCompare(String(b), undefined, { sensitivity: 'base' }));
-  return {
-    ...theirs,
-    ...ours,
-    records: mergeMap(base.records, ours.records, theirs.records, newer),
-    races: mergeMap(base.races, ours.races, theirs.races, mine),
-    traits: mergeMap(base.traits, ours.traits, theirs.traits, mine),
-    favouriteTiers: mergeMap(base.favouriteTiers, ours.favouriteTiers, theirs.favouriteTiers, mine),
-    favourites,
-  };
-}
+// One copy, shared with the desktop: shared/merge.js, loaded before this
+// module (see index.html) and read from the global scope here.
+export const mergeLibraries = (base, ours, theirs) => globalThis.mergeLibraries(base, ours, theirs);
 
 // The file as this phone last read or wrote it: its eTag, for a conditional
 // save, and its contents, as the common ancestor of a merge.
@@ -941,6 +901,7 @@ export async function findVideos(wanted) {
   return answers;
 }
 
+// The desktop's keyFor (shared/facets.js), on a Graph item's size and modified time.
 export function recordKey(video) {
-  return `${video.size}:${Math.round(video.mtime)}`;
+  return globalThis.keyFor({ size: video.size, mtimeMs: video.mtime });
 }

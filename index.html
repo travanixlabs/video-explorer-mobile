@@ -235,6 +235,11 @@
 <div id="status" class="busy" hidden></div>
 <div id="toasts" class="toasts"></div>
 
+<!-- The vocabularies and the merge the desktop uses, copied here by its
+     tools/sync-shared.js. Plain scripts, so they run before the module and
+     leave their names on the global scope for it. -->
+<script src="./shared/facets.js"></script>
+<script src="./shared/merge.js"></script>
 <script type="module" src="./app.js"></script>
 </body>
 </html>

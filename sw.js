@@ -9,13 +9,15 @@
  * would fill the phone and serve stale, dead URLs.
  */
 
-const VERSION = 'v40';
+const VERSION = 'v41';
 const SHELL = [
   './',
   './index.html',
   './app.js',
   './auth.js',
   './graph.js',
+  './shared/facets.js',
+  './shared/merge.js',
   './styles.css',
   './icon.svg',
   './icon-192.png',

@@ -7,6 +7,17 @@ import * as graph from './graph.js';
 
 const $ = (sel) => document.querySelector(sel);
 
+// The desktop's vocabularies and merge, from shared/facets.js and
+// shared/merge.js (loaded before this module; see index.html). Read from the
+// global scope rather than copied: a race or a tier added on the desktop used
+// to miss the phone, because the copy here was typed in by hand.
+const {
+  RACES, TRAITS, TIERS, DEFAULT_TIER, PERSON_FACETS, RATING_MAX, FACE_FLOOR, STAR_POINTS,
+} = globalThis;
+if (typeof FACE_FLOOR !== 'number' || !Array.isArray(RACES) || typeof globalThis.mergeLibraries !== 'function') {
+  throw new Error('shared/facets.js and shared/merge.js did not load before app.js');
+}
+
 /**
  * One collator for every comparison a sort makes. `localeCompare` with options
  * builds the locale machinery afresh on each call, and a sort of a flattened
@@ -498,8 +509,7 @@ function editRecord(video, patch) {
  * signal cannot cost you the ratings. `state.library` stays whatever it was, so
  * a retry that succeeds mid-session simply picks up.
  */
-// Ratings run 0 (unrated) to 10. They ran to 5 until 2026-10-05.
-const RATING_MAX = 10;
+// Ratings run 0 (unrated) to RATING_MAX (shared/facets.js). They ran to 5 until 2026-10-05.
 const RATING_VALUES = Array.from({ length: RATING_MAX + 1 }, (_, n) => n);
 
 /** A rating as a filter chip: its stars, half one and all. */
@@ -1431,7 +1441,7 @@ function syncGroupButton() {
  * number on purpose: a group here and a suggestion there disagreeing about who
  * might be in a video is the confusing part, not the number itself.
  */
-const FACE_FLOOR = 0.20;
+// FACE_FLOOR: shared/facets.js.
 
 function buildModelGroups(list, mode = 'models') {
   const groups = new Map();
@@ -1828,8 +1838,7 @@ function applyCardWidth() {
  * of threes adds up to one good video. A two or a one is a verdict against and
  * scores nothing, same as never having rated it.
  */
-// Points per rating, unrated to ten stars.
-const STAR_POINTS = [0, 50, 75, 100, 250, 500, 1000, 2500, 5000, 7500, 10000];
+// Points per rating, unrated to ten stars: STAR_POINTS, shared/facets.js.
 
 /**
  * Favourite performers, beside the records rather than inside them.
@@ -1868,12 +1877,10 @@ function isFavouriteModel(name) {
   return !!key && personIndex().favs.has(key);
 }
 
-/** A favourite's tier, 1 (the most) to 5; one with none recorded is a 3, as on the desktop. */
-const TIERS = [1, 2, 3, 4, 5];
-
+/** A favourite's tier, 1 (the most) to 5; one with none recorded is the default, as on the desktop. */
 function favouriteTier(name) {
   const held = Number(personIndex().tiers[String(name || '').trim().toLowerCase()]);
-  return TIERS.includes(held) ? held : 3;
+  return TIERS.includes(held) ? held : DEFAULT_TIER;
 }
 
 /**
@@ -2035,7 +2042,7 @@ function facesFilterMatch(map, video) {
  * works it out: every video credited to a performer carries hers, so a video
  * has as many races as it has labelled performers.
  */
-const RACES = ['Asian', 'Black', 'White', 'Other'];
+// RACES: shared/facets.js.
 
 function racesOf(record) {
   return personValues('race', record);
@@ -2046,13 +2053,7 @@ function racesOf(record) {
  * and they live beside the races in the library file. A video carries whatever
  * its credited performers have, so each is matched like a tag list.
  */
-const PERSON_FACETS = {
-  height: ['Tall', 'Average', 'Small'],
-  bust: ['Massive', 'Big', 'Average', 'Small'],
-  body: ['Athletic', 'Tattoos', 'Curvy', 'Average', 'Petite'],
-  race: RACES,
-  favourites: ['Tier 1', 'Tier 2', 'Tier 3', 'Tier 4', 'Tier 5'],
-};
+// PERSON_FACETS: shared/facets.js (TRAITS, then race, then the tiers).
 const PERSON_FIELDS = Object.keys(PERSON_FACETS);
 
 /** One performer facet's values on a video, in that facet's order. */
