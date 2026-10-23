@@ -1475,7 +1475,7 @@ function buildModelGroups(list, mode = 'models') {
     // Nor anyone turned down for this video: "not her" is an answer, and a
     // section built on a refused guess is the desktop's rule broken here.
     const names = (guessed
-      ? globalThis.suggestedNames(facesFor(video).suggested, { floor: FACE_FLOOR, refused: record.notModels })
+      ? globalThis.offeredNames(facesFor(video).suggested, { floor: FACE_FLOOR, refused: record.notModels })
       : (record.models || [])).map((n) => String(n).trim()).filter(Boolean);
     if (!names.length) { unnamed.push(video); continue; }
     const rating = Math.max(0, Math.min(RATING_MAX, Math.round(Number(record.rating) || 0)));

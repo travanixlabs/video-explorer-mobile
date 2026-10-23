@@ -51,13 +51,14 @@
   const lower = (n) => String(n).trim().toLowerCase();
 
   /**
-   * The names a video's suggestions put forward: at or above the floor, and
+   * The names a video's suggestions put forward (named apart from the
+   * page's own suggestedNames(file), which calls this): at or above the floor, and
    * not among `refused` (turned down on this video) or `credited` (already
    * named on it -- left out only when the caller says so, since a credited
    * name's suggestion is a confirmation worth showing in some views). Names
    * in the suggestions' own order, which is strongest first.
    */
-  function suggestedNames(suggested, { floor = 0, refused = [], credited = [] } = {}) {
+  function offeredNames(suggested, { floor = 0, refused = [], credited = [] } = {}) {
     const out = new Set((refused || []).map(lower));
     const done = new Set((credited || []).map(lower));
     const names = [];
@@ -70,5 +71,5 @@
     return names;
   }
 
-  return { fmtBytes, fmtDuration, starsNumber, suggestedNames };
+  return { fmtBytes, fmtDuration, starsNumber, offeredNames };
 }));
