@@ -1441,6 +1441,8 @@ function syncGroupButton() {
   if (!btn) return;
   btn.classList.toggle('on', Boolean(state.grouped));
   btn.classList.toggle('by-suggested', state.grouped === 'suggested');
+  const label = $('#groupBtnLabel');
+  if (label) label.textContent = { '': 'Off', models: 'Credited', suggested: 'Suggested' }[state.grouped] || 'Off';
   btn.title = {
     '': 'Ungrouped \u2014 tap to group by credited performer',
     models: 'Grouped by credited performer \u2014 tap to group by suggested performer',
@@ -2102,6 +2104,15 @@ function advActive(f = adv) {
   return FACETS.some((name) => f[name] && f[name].size > 0);
 }
 
+/** The Filter button's count: how many facets are in force. */
+function syncAdvBadge() {
+  const facets = FACETS.filter((name) => adv[name] && adv[name].size > 0).length;
+  const dot = $('#advDot');
+  dot.hidden = facets === 0;
+  dot.textContent = facets ? String(facets) : '';
+  $('#advBtn').classList.toggle('on', facets > 0);
+}
+
 /** The values a facet requires, or excludes. The emptiness chip is not a value. */
 function picked(facet, want) {
   return [...facet].filter(([value, mode]) => mode === want && value !== NOTHING)
@@ -2379,8 +2390,7 @@ function cycleIn(facet, value) {
 function applyAdv() {
   adv = advDraft;
   $('#adv').hidden = true;
-  $('#advDot').hidden = !advActive();
-  $('#advBtn').classList.toggle('on', advActive());
+  syncAdvBadge();
   gridKey = '';
   render();
 }
@@ -2415,8 +2425,7 @@ function filterByLabel(field, value) {
   advDraft = newAdvFilter();
   $('#search').value = '';
   state.query = '';
-  $('#advDot').hidden = !advActive();
-  $('#advBtn').classList.toggle('on', advActive());
+  syncAdvBadge();
   gridKey = '';
   render();
   toast(`${value} — ${filterByName(state.videos).length} here`, 'ok');
@@ -2621,24 +2630,54 @@ function buildCard(video) {
   attachSelection(shot, card, video);
   card.appendChild(shot);
 
+  // The name, with the "…" beside it: the visible way into select, tags,
+  // move and delete, so a long press is no longer the only route.
+  const head = document.createElement('div');
+  head.className = 'card-head';
   const name = document.createElement('div');
   name.className = 'name';
   name.textContent = video.name;
-  card.appendChild(name);
+  head.appendChild(name);
+  const more = document.createElement('button');
+  more.type = 'button';
+  more.className = 'card-more';
+  more.textContent = '…';
+  more.title = 'Select — then tags, move or delete';
+  more.setAttribute('aria-label', `Select ${video.name}`);
+  more.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    if (state.selecting) toggleSelect(video, card);
+    else enterSelection(video, card);
+    card.classList.remove('just-picked');
+  });
+  head.appendChild(more);
+  card.appendChild(head);
 
+  // How long, how sharp and when on the left; the stars on the right.
   const meta = document.createElement('div');
   meta.className = 'meta';
-  meta.textContent = [
-    video.width ? `${video.width}×${video.height}` : '',
-    fmtBytes(video.size),
-    video.bitrate ? `${Math.round(video.bitrate / 1000)} kbps` : '',
-  ].filter(Boolean).join('  ·  ');
+  const facts = document.createElement('span');
+  facts.className = 'meta-text';
+  facts.textContent = cardMetaText(video);
+  meta.appendChild(facts);
+  const rating = recordFor(video).rating || 0;
+  if (rating) meta.appendChild(buildStarDisplay(rating));
   card.appendChild(meta);
 
-  card.appendChild(buildRecordRow(video));
+  card.appendChild(buildRecordRow(video, { stars: false }));
   const line = buildFolderLine(video);
   if (line) card.appendChild(line);
   return card;
+}
+
+/** "12:34 · 1080p · 26 Aug 2025": the line under a card's name. */
+function cardMetaText(video) {
+  const lines = video.width && video.height ? Math.min(video.width, video.height) : 0;
+  return [
+    video.duration ? fmtTime(video.duration) : '',
+    lines ? (lines >= 2100 ? '4K' : `${lines}p`) : '',
+    video.mtime ? new Date(video.mtime).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '',
+  ].filter(Boolean).join(' · ');
 }
 
 /**
@@ -3071,22 +3110,28 @@ function closeLineup() {
   $('#lineup').hidden = true;
 }
 
-function buildRecordRow(video, { add = false } = {}) {
+function buildRecordRow(video, { add = false, stars = true } = {}) {
   const record = recordFor(video);
   const row = document.createElement('div');
   // `add` is only ever set by the player, which is also where race shows.
   row.className = 'record' + (add ? ' in-player' : '');
 
-  // Pressable only in the player. On a card they say what the rating is;
-  // rating is the player's, or the labels sheet's for a selection.
-  row.appendChild(add
-    ? buildStarRow(record.rating || 0, (rating) => {
+  // Pressable only in the player. On a card the stars sit on the meta line
+  // (buildCard), so the row there is the labels alone.
+  if (add) {
+    row.appendChild(buildStarRow(record.rating || 0, (rating) => {
       const before = playerList();
       editRecord(video, { rating });
       row.replaceWith(buildRecordRow(video, { add }));
       if (advActive()) { render(); followListing(before); }
-    })
-    : buildStarDisplay(record.rating || 0));
+    }));
+    const hint = document.createElement('span');
+    hint.className = 'stars-hint dim';
+    hint.textContent = 'tap to rate';
+    row.appendChild(hint);
+  } else if (stars) {
+    row.appendChild(buildStarDisplay(record.rating || 0));
+  }
 
   const chips = buildLabelChips(video, row);
   // Only in the player: there you are looking at one video and naming it is
@@ -4048,6 +4093,32 @@ function showGate() {
 
 /** The sort keys sortVideos understands, as the select offers them. */
 const SORT_KEY = 'video-explorer.sort';
+const LAYOUT_KEY = 'video-explorer.layout';
+
+/**
+ * Cards or a list. The same cards either way: the list lays each one out as
+ * a row -- the picture on the left, the name, the meta and the pills beside
+ * it -- so nothing is built twice and the scrub still works on the picture.
+ */
+function setLayout(mode, { save = true } = {}) {
+  const list = mode === 'list';
+  document.body.classList.toggle('list-mode', list);
+  for (const [id, on] of [['#viewCards', !list], ['#viewList', list]]) {
+    const btn = $(id);
+    if (!btn) continue;
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-pressed', String(on));
+  }
+  if (save) { try { localStorage.setItem(LAYOUT_KEY, list ? 'list' : 'cards'); } catch { /* this run only */ } }
+}
+
+function restoreLayout() {
+  let mode = 'cards';
+  try { mode = localStorage.getItem(LAYOUT_KEY) || 'cards'; } catch { /* the default */ }
+  setLayout(mode, { save: false });
+  $('#viewCards').addEventListener('click', () => setLayout('cards'));
+  $('#viewList').addEventListener('click', () => setLayout('list'));
+}
 const SORTS = ['rating', 'name', 'mtime', 'size', 'duration', 'models', 'tags', 'folder'];
 
 function restoreSort() {
@@ -4217,6 +4288,7 @@ async function boot() {
   // The sort, chosen here and remembered per device. The keys are the ones
   // sortVideos has always understood; until now only the default was reachable.
   restoreSort();
+  restoreLayout();
   syncSortControls();
   $('#sortSel').addEventListener('change', (ev) => {
     state.sort = ev.target.value;

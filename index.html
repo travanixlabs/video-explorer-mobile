@@ -34,32 +34,36 @@
   <header class="top">
     <div id="crumb" class="crumb-bar"></div>
     <div class="tools">
-      <input id="search" type="search" class="search" placeholder="name or #tag" autocomplete="off">
-      <select id="sortSel" class="btn sort-sel" aria-label="Sort by" title="Sort by">
-        <option value="name">Name</option>
-        <option value="mtime">Date modified</option>
-        <option value="size">File size</option>
-        <option value="duration">Duration</option>
-        <option value="rating">Rating</option>
-        <option value="models">Model</option>
-        <option value="tags">Tag</option>
-        <option value="folder">Folder</option>
-      </select>
-      <button id="sortDir" class="btn icon" title="Reverse the sort" aria-label="Reverse the sort">↓</button>
-      <button id="flatBtn" class="btn icon" title="Flatten subfolders — every video below here" aria-label="Flatten subfolders" aria-pressed="false">⇊</button>
-      <button id="advBtn" class="btn icon" title="Advanced filters" aria-label="Advanced filters">
-        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-          <path d="M1.5 2.5h13L9.5 8.6v4.2l-3 1.7V8.6z" fill="none" stroke="currentColor"
-                stroke-width="1.4" stroke-linejoin="round"/>
-        </svg>
-        <span id="advDot" class="adv-dot" hidden></span>
+      <input id="search" type="search" class="search" placeholder="Search" autocomplete="off">
+    </div>
+    <!-- The state buttons, scrolling sideways: each says what it holds. -->
+    <div class="tools state-row">
+      <label class="btn state-btn sort-pill" title="Sort by">
+        <span class="state-lead">Sort:</span>
+        <select id="sortSel" class="sort-sel" aria-label="Sort by">
+          <option value="name">Name</option>
+          <option value="mtime">Date modified</option>
+          <option value="size">File size</option>
+          <option value="duration">Duration</option>
+          <option value="rating">Rating</option>
+          <option value="models">Model</option>
+          <option value="tags">Tag</option>
+          <option value="folder">Folder</option>
+        </select>
+        <button id="sortDir" class="sort-dir" title="Reverse the sort" aria-label="Reverse the sort">↓</button>
+      </label>
+      <button id="groupBtn" class="btn state-btn" title="Group by performer" aria-label="Group by performer">
+        <span class="state-lead">Group:</span><span id="groupBtnLabel">Off</span>
       </button>
-      <button id="groupBtn" class="btn icon" title="Group by performer" aria-label="Group by performer">
-        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-          <path d="M8 13.8C8 13.8 2 10.3 2 6.3a3 3 0 0 1 6-1.1 3 3 0 0 1 6 1.1c0 4-6 7.5-6 7.5z"
-                fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
-        </svg>
+      <button id="advBtn" class="btn state-btn" title="Filter" aria-label="Filter">
+        Filter<span id="advDot" class="adv-count" hidden></span>
       </button>
+      <button id="flatBtn" class="btn state-btn" title="Flatten subfolders — every video below here" aria-label="Flatten subfolders" aria-pressed="false">Flatten</button>
+      <!-- Cards or a list: the list keeps the same cards, laid out as rows. -->
+      <span class="view-toggle" role="group" aria-label="Layout">
+        <button id="viewCards" class="view-btn on" type="button" aria-pressed="true" title="Cards" aria-label="Cards">▦</button>
+        <button id="viewList" class="view-btn" type="button" aria-pressed="false" title="List" aria-label="List">☰</button>
+      </span>
     </div>
   </header>
 
@@ -208,14 +212,16 @@
 
 <div id="player" class="player" role="dialog" aria-modal="true" aria-label="Player" hidden>
   <div class="player-bar">
-    <span id="playerName" class="player-name"></span>
-    <span id="playerPos" class="player-pos"></span>
+    <button id="playerClose" class="btn ghost player-down" aria-label="Close the player">↓</button>
+    <span class="player-head-text">
+      <span id="playerName" class="player-name"></span>
+      <span id="playerPos" class="player-pos"></span>
+    </span>
     <button id="playerInfoBtn" class="btn ghost player-info-btn" title="Details" aria-label="Details" aria-pressed="false">ⓘ</button>
     <button id="playerRandom" class="btn ghost" title="Random — the next video is any one in this listing" aria-pressed="false">🔀</button>
     <button id="playerRepeat" class="btn ghost" title="Repeat — play this video again at its end" aria-pressed="false">🔁</button>
     <button id="playerAuto" class="btn ghost" title="Autoplay the next video" aria-label="Autoplay the next video" aria-pressed="false">⏭</button>
     <button id="playerSound" class="btn ghost" title="Sound" aria-label="Sound">🔇</button>
-    <button id="playerClose" class="btn ghost" aria-label="Close the player">✕</button>
   </div>
   <div class="player-stage">
     <video id="playerVideo" playsinline preload="metadata"></video>
