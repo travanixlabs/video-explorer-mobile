@@ -36,18 +36,18 @@
     <div class="tools">
       <input id="search" type="search" class="search" placeholder="name or #tag" autocomplete="off">
       <select id="sortSel" class="btn sort-sel" aria-label="Sort by" title="Sort by">
-        <option value="rating">Rating</option>
         <option value="name">Name</option>
-        <option value="mtime">Date</option>
-        <option value="size">Size</option>
-        <option value="duration">Length</option>
-        <option value="models">Models</option>
-        <option value="tags">Tags</option>
+        <option value="mtime">Date modified</option>
+        <option value="size">File size</option>
+        <option value="duration">Duration</option>
+        <option value="rating">Rating</option>
+        <option value="models">Model</option>
+        <option value="tags">Tag</option>
         <option value="folder">Folder</option>
       </select>
       <button id="sortDir" class="btn icon" title="Reverse the sort" aria-label="Reverse the sort">↓</button>
-      <button id="flatBtn" class="btn icon" title="Flatten subfolders — every video below here">⇊</button>
-      <button id="advBtn" class="btn icon" title="Advanced filters">
+      <button id="flatBtn" class="btn icon" title="Flatten subfolders — every video below here" aria-label="Flatten subfolders" aria-pressed="false">⇊</button>
+      <button id="advBtn" class="btn icon" title="Advanced filters" aria-label="Advanced filters">
         <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
           <path d="M1.5 2.5h13L9.5 8.6v4.2l-3 1.7V8.6z" fill="none" stroke="currentColor"
                 stroke-width="1.4" stroke-linejoin="round"/>
@@ -94,9 +94,9 @@
 </main>
 
 <div id="adv" class="picker" hidden>
-  <div class="picker-card">
+  <div class="picker-card" role="dialog" aria-modal="true" aria-labelledby="advTitle">
     <header class="picker-head">
-      <span>Advanced filters</span>
+      <span id="advTitle">Advanced filters</span>
       <button id="advReset" class="btn ghost">Reset</button>
       <button id="advClose" class="btn ghost">✕</button>
     </header>
@@ -129,7 +129,7 @@
       <div id="advRating" class="chip-row"></div>
 
       <div id="advFacesRow" hidden>
-        <div class="adv-label">Faces <span class="dim">from the desktop's face recognition</span></div>
+        <div class="adv-label">Faces <span class="dim">from the desktop's face sweep</span></div>
         <div id="advFaces" class="chip-row"></div>
       </div>
 
@@ -147,10 +147,10 @@
 </div>
 
 <div id="lineup" class="picker" hidden>
-  <div class="picker-card">
+  <div class="picker-card" role="dialog" aria-modal="true" aria-labelledby="lineupTitle">
     <header class="picker-head">
       <span id="lineupTitle">Lineup</span>
-      <button id="lineupClose" class="btn ghost">✕</button>
+      <button id="lineupClose" class="btn ghost" aria-label="Close">✕</button>
     </header>
     <div class="adv-body">
       <p id="lineupHint" class="dim"></p>
@@ -160,7 +160,7 @@
 </div>
 
 <div id="labels" class="picker" hidden>
-  <div class="picker-card">
+  <div class="picker-card" role="dialog" aria-modal="true" aria-labelledby="labelsTitle">
     <header class="picker-head">
       <span id="labelsTitle">Labels</span>
       <button id="labelsClose" class="btn ghost">✕</button>
@@ -192,10 +192,10 @@
 </div>
 
 <div id="picker" class="picker" hidden>
-  <div class="picker-card">
+  <div class="picker-card" role="dialog" aria-modal="true" aria-labelledby="pickerTitle">
     <header class="picker-head">
       <span id="pickerTitle">Move to…</span>
-      <button id="pickerClose" class="btn ghost">✕</button>
+      <button id="pickerClose" class="btn ghost" aria-label="Close">✕</button>
     </header>
     <div id="pickerCrumb" class="crumb-bar"></div>
     <div id="pickerList" class="folders picker-list"></div>
@@ -206,16 +206,16 @@
   </div>
 </div>
 
-<div id="player" class="player" hidden>
+<div id="player" class="player" role="dialog" aria-modal="true" aria-label="Player" hidden>
   <div class="player-bar">
     <span id="playerName" class="player-name"></span>
     <span id="playerPos" class="player-pos"></span>
     <button id="playerInfoBtn" class="btn ghost player-info-btn" title="Details" aria-label="Details" aria-pressed="false">ⓘ</button>
     <button id="playerRandom" class="btn ghost" title="Random — the next video is any one in this listing" aria-pressed="false">🔀</button>
     <button id="playerRepeat" class="btn ghost" title="Repeat — play this video again at its end" aria-pressed="false">🔁</button>
-    <button id="playerAuto" class="btn ghost" title="Autoplay the next video">⏭</button>
-    <button id="playerSound" class="btn ghost" title="Sound">🔇</button>
-    <button id="playerClose" class="btn ghost">✕</button>
+    <button id="playerAuto" class="btn ghost" title="Autoplay the next video" aria-label="Autoplay the next video" aria-pressed="false">⏭</button>
+    <button id="playerSound" class="btn ghost" title="Sound" aria-label="Sound">🔇</button>
+    <button id="playerClose" class="btn ghost" aria-label="Close the player">✕</button>
   </div>
   <div class="player-stage">
     <video id="playerVideo" playsinline preload="metadata"></video>
@@ -232,14 +232,16 @@
 </div>
 
 <div id="pullHint" class="pull-hint" hidden></div>
-<div id="status" class="busy" hidden></div>
-<div id="toasts" class="toasts"></div>
+<div id="offline" class="offline-strip" role="status" hidden>Offline — showing a saved copy</div>
+<div id="status" class="busy" aria-live="polite" hidden></div>
+<div id="toasts" class="toasts" role="status" aria-live="polite"></div>
 
 <!-- The vocabularies and the merge the desktop uses, copied here by its
      tools/sync-shared.js. Plain scripts, so they run before the module and
      leave their names on the global scope for it. -->
 <script src="./shared/facets.js"></script>
 <script src="./shared/merge.js"></script>
+<script src="./shared/format.js"></script>
 <script type="module" src="./app.js"></script>
 </body>
 </html>

@@ -9,7 +9,7 @@
  * would fill the phone and serve stale, dead URLs.
  */
 
-const VERSION = 'v41';
+const VERSION = 'v42';
 const SHELL = [
   './',
   './index.html',
@@ -18,6 +18,7 @@ const SHELL = [
   './graph.js',
   './shared/facets.js',
   './shared/merge.js',
+  './shared/format.js',
   './styles.css',
   './icon.svg',
   './icon-192.png',

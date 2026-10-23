@@ -240,11 +240,25 @@ index.html              layout
 app.js                  browsing, scrubbing, player, ratings
 auth.js                 PKCE sign-in — no MSAL, four fetches and a redirect
 graph.js                Graph client: listing, streaming, library.json
+shared/facets.js        the vocabularies (races, traits, tiers, the key) -- GENERATED
+shared/merge.js         the three-way library merge -- GENERATED
+shared/format.js        bytes, durations, star numbers, suggested names -- GENERATED
 styles.css              dark theme, safe-area aware
 sw.js                   caches the app shell only, never video or signed URLs
 manifest.webmanifest    home-screen install
+make-icons.js           draws icon.svg, icon-192.png and icon-512.png
+icon.svg, icon-*.png    the home-screen icon
 serve.js                local dev server
 ```
+
+The three `shared/` files are copies of the desktop app's `shared/` folder,
+written by `node tools/sync-shared.js` there; a test on the desktop fails when
+a copy drifts. Edit the desktop's file and run the tool, never these.
+
+**Every change to the phone bumps `VERSION` in `sw.js`** (`v41` → `v42`). The
+service worker caches the app shell under that name and throws the old cache
+away when a new version installs; without the bump a phone that already has
+the app keeps serving the old files until the cache happens to miss.
 
 ## Known gaps
 

@@ -147,19 +147,22 @@ async function flushBatch() {
 
 // --------------------------------------------------------------- utilities
 
-function fmtBytes(bytes) {
-  if (!bytes) return '';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let n = bytes;
-  let i = 0;
-  while (n >= 1024 && i < units.length - 1) { n /= 1024; i += 1; }
-  return `${n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
-}
-
 function toast(message, kind = '', action = null) {
   const el = document.createElement('div');
   el.className = 'toast ' + kind;
   el.textContent = message;
+  // An error is announced at once and can be put away by hand; it also
+  // stays longer than a note, since it asks for something to be done.
+  if (kind === 'err') {
+    el.setAttribute('role', 'alert');
+    const x = document.createElement('button');
+    x.className = 'toast-x';
+    x.type = 'button';
+    x.textContent = '\u2715';
+    x.setAttribute('aria-label', 'Dismiss');
+    x.addEventListener('click', () => el.remove());
+    el.appendChild(x);
+  }
   // A toast with an action stays up long enough to press it.
   if (action) {
     const btn = document.createElement('button');
@@ -170,13 +173,24 @@ function toast(message, kind = '', action = null) {
   }
   $('#toasts').appendChild(el);
   // A sticky one waits to be answered.
-  if (!(action && action.sticky)) setTimeout(() => el.remove(), action ? 8000 : 3200);
+  if (!(action && action.sticky)) setTimeout(() => el.remove(), action ? 8000 : (kind === 'err' ? 7000 : 3200));
+}
+
+/** The strip that says the listing is the saved copy, for as long as it is. */
+function syncOfflineStrip() {
+  const strip = $('#offline');
+  if (strip) strip.hidden = !state.offline;
 }
 
 function setBusy(text) {
   $('#status').textContent = text || '';
   $('#status').hidden = !text;
 }
+
+// fmtBytes, fmtDuration and starsNumber: shared/format.js, loaded as a plain
+// script before this module (index.html), the same file the desktop uses.
+const { fmtBytes, fmtDuration, starsNumber } = globalThis;
+const fmtTime = fmtDuration;
 
 // ------------------------------------------------------------------ library
 
@@ -534,11 +548,6 @@ function starsNode(rating) {
   return run;
 }
 
-/** A stored rating as a number of stars, for tooltips: 7 is "3.5". */
-function starsNumber(rating) {
-  return String((Math.round(Number(rating) || 0)) / 2);
-}
-
 /** Lights a row of five for a value: whole stars, then a half if it is odd. */
 function paintStarRow(wrap, value) {
   wrap.querySelectorAll('.star').forEach((star, i) => {
@@ -670,9 +679,9 @@ async function readLibrary() {
         state.library = toTenStars(err.library);
         libraryChanged();
         if (state.videos.length) render();
-        toast('Offline — showing saved labels', 'err');
+        toast('Offline — showing saved labels', 'warn');
       } else {
-        toast('Offline — labels will load when the signal is back', 'err');
+        toast('Offline — labels will load when the signal is back', 'warn');
       }
       return false;
     }
@@ -810,6 +819,7 @@ async function openFolder(entry, { push = true } = {}) {
   state.walk = null;
   state.skipped = 0;
   state.offline = false;
+  syncOfflineStrip();
   render();
   window.scrollTo(0, 0);
   setBusy('Loading…');
@@ -860,7 +870,7 @@ async function useSavedListing(run) {
   const saved = await graph.kvGet(state.source.saveKey);
   if (state.load !== run) return;
   if (!saved || !Array.isArray(saved.videos)) {
-    toast('Offline — nothing saved for this folder yet', 'err');
+    toast('Offline — nothing saved for this folder yet', 'warn');
     return;
   }
   state.offline = true;
@@ -872,7 +882,8 @@ async function useSavedListing(run) {
   setBusy('');
   gridKey = '';
   render();
-  toast('Offline — showing the last listing saved here', 'err');
+  syncOfflineStrip();
+  toast('Offline — showing the last listing saved here', 'warn');
 }
 
 /**
@@ -1117,6 +1128,10 @@ function syncPagePin() {
   const open = overlayOpen();
   // Whatever opened it, Back now has something to close.
   if (open) armTrap();
+  // The page behind a sheet or the player is inert: nothing in it can be
+  // tabbed to or read while the sheet is up.
+  const main = $('#main');
+  if (main) main.inert = Boolean(open);
   if (open === (pinnedAt !== null)) return; // an overlay over an overlay changes nothing
   if (open) {
     pinnedAt = window.scrollY;
@@ -1459,12 +1474,8 @@ function buildModelGroups(list, mode = 'models') {
     //
     // Nor anyone turned down for this video: "not her" is an answer, and a
     // section built on a refused guess is the desktop's rule broken here.
-    const refused = guessed && record.notModels.length
-      ? new Set(record.notModels.map((n) => String(n).toLowerCase())) : null;
     const names = (guessed
-      ? facesFor(video).suggested
-        .filter((s) => s.score >= FACE_FLOOR && !(refused && refused.has(String(s.name).toLowerCase())))
-        .map((s) => s.name)
+      ? globalThis.suggestedNames(facesFor(video).suggested, { floor: FACE_FLOOR, refused: record.notModels })
       : (record.models || [])).map((n) => String(n).trim()).filter(Boolean);
     if (!names.length) { unnamed.push(video); continue; }
     const rating = Math.max(0, Math.min(RATING_MAX, Math.round(Number(record.rating) || 0)));
@@ -2567,6 +2578,14 @@ async function confirmMove() {
 function buildCard(video) {
   const card = document.createElement('article');
   card.className = 'card' + (state.selected.has(video.id) ? ' picked' : '');
+  // Reachable by a keyboard or a switch: Enter does what a tap does.
+  card.tabIndex = 0;
+  card.setAttribute('aria-label', video.name);
+  card.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Enter' || ev.target !== card) return;
+    ev.preventDefault();
+    card.click();
+  });
 
   const shot = document.createElement('div');
   shot.className = 'shot';
@@ -2772,10 +2791,6 @@ function draftAdd(field, raw) {
   if (labelDraft[field].some((t) => t.toLowerCase() === name.toLowerCase())) return false;
   labelDraft[field].push(name);
   return true;
-}
-
-function parseList(text) {
-  return text.split(',').map((t) => t.trim()).filter(Boolean);
 }
 
 /** The vocabulary as taps, which beats typing a name on a phone. */
@@ -3294,12 +3309,6 @@ function seekTo(session, fraction) {
       seekTo(session, latest);
     }
   }, { once: true });
-}
-
-function fmtTime(seconds) {
-  const s = Math.max(0, Math.round(seconds));
-  const m = Math.floor(s / 60);
-  return `${m}:${String(s % 60).padStart(2, '0')}`;
 }
 
 function endScrub() {
@@ -4110,6 +4119,7 @@ async function boot() {
   $('#flatBtn').addEventListener('click', () => {
     state.flatten = !state.flatten;
     $('#flatBtn').classList.toggle('on', state.flatten);
+    $('#flatBtn').setAttribute('aria-pressed', String(state.flatten));
     const here = state.stack[state.stack.length - 1] || null;
     openFolder(here, { push: false });
   });

@@ -97,7 +97,41 @@
     return out;
   }
 
-  function mergeLibraries(base, ours, theirs) {
+  /**
+   * A record that moved to a new key on one side -- its tags were written
+   * into the file, or a copy came back under a new modified time -- lists
+   * the old key in `aliases`. An edit the other side made under the OLD key
+   * meanwhile used to come back as an orphan record there, and the new key
+   * never received it. So before the records are compared, each side's
+   * record under an alias of the other side's record is folded onto the new
+   * key (field by field, as two edits of one record are), and the alias key
+   * is dropped from that side and from the base.
+   */
+  function foldAliases(base, ours, theirs) {
+    const b = { ...base, records: { ...(base.records || {}) } };
+    const o = { ...ours, records: { ...(ours.records || {}) } };
+    const t = { ...theirs, records: { ...(theirs.records || {}) } };
+    const fold = (keeper, other) => {
+      for (const [key, record] of Object.entries(keeper.records)) {
+        if (!record || !Array.isArray(record.aliases)) continue;
+        for (const alias of record.aliases) {
+          if (alias === key || !(alias in other.records)) continue;
+          const stale = other.records[alias];
+          delete other.records[alias];
+          const under = other.records[key];
+          other.records[key] = under ? mergeRecord(b.records[alias] || b.records[key], under, stale) : stale;
+          if (alias in b.records && !(key in b.records)) b.records[key] = b.records[alias];
+          delete b.records[alias];
+        }
+      }
+    };
+    fold(o, t);
+    fold(t, o);
+    return [b, o, t];
+  }
+
+  function mergeLibraries(rawBase, rawOurs, rawTheirs) {
+    const [base, ours, theirs] = foldAliases(rawBase || {}, rawOurs || {}, rawTheirs || {});
     const pick = (b, o, t, both) => {
       const oc = !same(o, b);
       const tc = !same(t, b);
@@ -140,5 +174,5 @@
     };
   }
 
-  return { mergeLibraries, mergeRecord, mergeList };
+  return { mergeLibraries, mergeRecord, mergeList, foldAliases };
 }));

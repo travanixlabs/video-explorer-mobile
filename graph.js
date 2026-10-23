@@ -221,27 +221,6 @@ export async function listPage(driveId, itemId, next = null) {
 }
 
 /**
- * A page of children with the folders kept, for the flattened walk.
- *
- * listPage() throws folders away because it has to: taking them from a listing
- * that is still loading is what once hid a subfolder. Flattening pages through
- * every child anyway, so the subfolders arrive free with the videos and cost no
- * request of their own.
- *
- * No $orderby: the walk cannot be in global name order regardless -- it covers
- * one folder at a time -- and the default ordering is the cheaper one.
- */
-export async function listChildren(driveId, itemId, next = null) {
-  const page = await call(next || childrenUrl(driveId, itemId, `?$select=${SELECT}&$top=${PAGE}`));
-  const entries = (page.value || []).map(normalise);
-  return {
-    videos: entries.filter((e) => e.video),
-    folders: entries.filter((e) => e.isFolder),
-    next: page['@odata.nextLink'] || null,
-  };
-}
-
-/**
  * Twenty listings in one round trip.
  *
  * A walk down a tree is dominated by latency rather than by bytes: a folder of
@@ -440,10 +419,6 @@ export async function moveItem(item, dest) {
  */
 export async function deleteItem(item) {
   await call(itemBase(item.driveId, item.id), { method: 'DELETE' });
-}
-
-export async function itemById(driveId, itemId) {
-  return normalise(await call(`${itemBase(driveId, itemId)}?$expand=thumbnails`));
 }
 
 // ----------------------------------------------------------- a small kv store
@@ -838,68 +813,6 @@ export async function dailyBackup(library) {
 }
 
 /** Must match library.js on the desktop exactly, or records will not line up. */
-/**
- * Finds the items behind a set of sidecar records.
- *
- * The sidecar is keyed by size and modified time, deliberately — that survives a
- * rename, which an item id would too but a path would not. The cost is that a
- * record on its own cannot be turned back into something Graph will serve, and
- * the favourites list is exactly that: names and ratings with no items.
- *
- * So each one is searched for by filename and then confirmed on size and
- * modified time, which is what makes a common name safe. Searches go up in
- * batches of twenty, and a hit is worth caching for the session: the answer
- * cannot change unless the file does, and if the file changes its key changes
- * with it.
- *
- * Shared-with-me items are not in this index. Those simply come back unfound,
- * which costs a blank tile rather than a wrong one.
- */
-const foundItems = new Map();
-
-export async function findVideos(wanted) {
-  const answers = new Map();
-  const todo = [];
-  for (const item of wanted) {
-    const key = `${item.size}:${Math.round(item.mtime)}`;
-    if (foundItems.has(key)) {
-      const hit = foundItems.get(key);
-      if (hit) answers.set(key, hit);
-    } else todo.push({ ...item, key });
-  }
-  if (!todo.length) return answers;
-
-  for (let at = 0; at < todo.length; at += 20) {
-    const slice = todo.slice(at, at + 20);
-    let replies;
-    try {
-      replies = await batchCall(slice.map((item, index) => ({
-        id: String(index),
-        method: 'GET',
-        // Doubled apostrophes: an OData string literal escapes them that
-        // way, and plenty of these names have one in them.
-        url: `/me/drive/root/search(q='${encodeURIComponent(item.name.replace(/'/g, "''"))}')`
-          + `?$select=${SELECT}&$top=12`,
-      })));
-    } catch {
-      return answers; // no stills is a lesser failure than no list
-    }
-
-    for (const [id, response] of replies) {
-      const asked = slice[Number(id)];
-      if (!asked) continue;
-      // Still throttled after every retry is not "not found", and must not be
-      // remembered as it for the session.
-      if (RETRY_STATUS.has(response.status)) continue;
-      const hits = response.status === 200 ? ((response.body || {}).value || []) : [];
-      const match = hits.map(normalise).find((candidate) => candidate.size === asked.size
-        && Math.round(candidate.mtime) === Math.round(asked.mtime));
-      foundItems.set(asked.key, match || null);
-      if (match) answers.set(asked.key, match);
-    }
-  }
-  return answers;
-}
 
 // The desktop's keyFor (shared/facets.js), on a Graph item's size and modified time.
 export function recordKey(video) {
